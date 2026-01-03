@@ -49,6 +49,12 @@ public class RevalidateProjectTool implements IMcpTool
     }
     
     @Override
+    public ResponseType getResponseType()
+    {
+        return ResponseType.JSON;
+    }
+    
+    @Override
     public String execute(Map<String, String> params)
     {
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$

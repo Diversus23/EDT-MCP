@@ -59,12 +59,11 @@ public class GetProblemSummaryTool implements IMcpTool
      * Gets problem summary for project(s) using EDT IMarkerManager.
      * 
      * @param projectName specific project name or null for all projects
-     * @return JSON string with problem summary
+     * @return Markdown string with problem summary
      */
     public static String getProblemSummary(String projectName)
     {
-        StringBuilder json = new StringBuilder();
-        json.append("{"); //$NON-NLS-1$
+        StringBuilder md = new StringBuilder();
         
         try
         {
@@ -72,10 +71,7 @@ public class GetProblemSummaryTool implements IMcpTool
             
             if (markerManager == null)
             {
-                json.append("\"success\": false,"); //$NON-NLS-1$
-                json.append("\"error\": \"IMarkerManager service is not available\""); //$NON-NLS-1$
-                json.append("}"); //$NON-NLS-1$
-                return json.toString();
+                return "**Error:** IMarkerManager service is not available"; //$NON-NLS-1$
             }
             
             IWorkspace workspace = ResourcesPlugin.getWorkspace();
@@ -86,10 +82,7 @@ public class GetProblemSummaryTool implements IMcpTool
                 IProject project = workspace.getRoot().getProject(projectName);
                 if (project == null || !project.exists())
                 {
-                    json.append("\"success\": false,"); //$NON-NLS-1$
-                    json.append("\"error\": \"Project not found: ").append(JsonUtils.escapeJson(projectName)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                    json.append("}"); //$NON-NLS-1$
-                    return json.toString();
+                    return "**Error:** Project not found: " + projectName; //$NON-NLS-1$
                 }
             }
             
@@ -149,64 +142,78 @@ public class GetProblemSummaryTool implements IMcpTool
             // Calculate total
             int grandTotal = totals.values().stream().mapToInt(Integer::intValue).sum();
             
-            // Build JSON response
-            json.append("\"success\": true,"); //$NON-NLS-1$
-            json.append("\"totals\": {"); //$NON-NLS-1$
+            // Build Markdown response
+            md.append("## Problem Summary\n\n"); //$NON-NLS-1$
             
-            boolean first = true;
+            // Totals section
+            md.append("### Overall Totals\n\n"); //$NON-NLS-1$
+            md.append("| Severity | Count |\n"); //$NON-NLS-1$
+            md.append("|----------|-------|\n"); //$NON-NLS-1$
+            
             for (MarkerSeverity sev : MarkerSeverity.values())
             {
                 if (sev == MarkerSeverity.NONE && totals.get(sev) == 0)
                 {
                     continue; // Skip NONE if empty
                 }
-                if (!first)
-                {
-                    json.append(","); //$NON-NLS-1$
-                }
-                first = false;
-                json.append("\"").append(sev.name()).append("\": ").append(totals.get(sev)); //$NON-NLS-1$ //$NON-NLS-2$
+                md.append("| ").append(sev.name()).append(" | ").append(totals.get(sev)).append(" |\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
-            json.append(",\"total\": ").append(grandTotal); //$NON-NLS-1$
-            json.append("},"); //$NON-NLS-1$
+            md.append("| **TOTAL** | **").append(grandTotal).append("** |\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
             
-            json.append("\"projects\": ["); //$NON-NLS-1$
-            first = true;
-            for (Map.Entry<String, Map<MarkerSeverity, Integer>> entry : projectSummaries.entrySet())
+            // Projects section
+            if (!projectSummaries.isEmpty())
             {
-                if (!first)
+                md.append("### By Project\n\n"); //$NON-NLS-1$
+                md.append("| Project | Errors | Blocker | Critical | Major | Minor | Trivial | Total |\n"); //$NON-NLS-1$
+                md.append("|---------|--------|---------|----------|-------|-------|---------|-------|\n"); //$NON-NLS-1$
+                
+                for (Map.Entry<String, Map<MarkerSeverity, Integer>> entry : projectSummaries.entrySet())
                 {
-                    json.append(","); //$NON-NLS-1$
+                    Map<MarkerSeverity, Integer> counts = entry.getValue();
+                    int projectTotal = counts.values().stream().mapToInt(Integer::intValue).sum();
+                    
+                    md.append("| "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(entry.getKey()));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(counts.getOrDefault(MarkerSeverity.ERRORS, 0));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(counts.getOrDefault(MarkerSeverity.BLOCKER, 0));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(counts.getOrDefault(MarkerSeverity.CRITICAL, 0));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(counts.getOrDefault(MarkerSeverity.MAJOR, 0));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(counts.getOrDefault(MarkerSeverity.MINOR, 0));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(counts.getOrDefault(MarkerSeverity.TRIVIAL, 0));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(projectTotal);
+                    md.append(" |\n"); //$NON-NLS-1$
                 }
-                first = false;
-                
-                Map<MarkerSeverity, Integer> counts = entry.getValue();
-                int projectTotal = counts.values().stream().mapToInt(Integer::intValue).sum();
-                
-                json.append("{"); //$NON-NLS-1$
-                json.append("\"project\": \"").append(JsonUtils.escapeJson(entry.getKey())).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                
-                for (MarkerSeverity sev : MarkerSeverity.values())
-                {
-                    if (sev == MarkerSeverity.NONE && counts.get(sev) == 0)
-                    {
-                        continue;
-                    }
-                    json.append("\"").append(sev.name()).append("\": ").append(counts.get(sev)).append(","); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                }
-                json.append("\"total\": ").append(projectTotal); //$NON-NLS-1$
-                json.append("}"); //$NON-NLS-1$
             }
-            json.append("]"); //$NON-NLS-1$
+            else
+            {
+                md.append("*No problems found.*\n"); //$NON-NLS-1$
+            }
         }
         catch (Exception e)
         {
             Activator.logError("Error getting problem summary", e); //$NON-NLS-1$
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"").append(JsonUtils.escapeJson(e.getMessage())).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+            return "**Error:** " + e.getMessage(); //$NON-NLS-1$
         }
         
-        json.append("}"); //$NON-NLS-1$
-        return json.toString();
+        return md.toString();
+    }
+    
+    /**
+     * Escapes special Markdown characters in text.
+     */
+    private static String escapeMarkdown(String text)
+    {
+        if (text == null)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
 }

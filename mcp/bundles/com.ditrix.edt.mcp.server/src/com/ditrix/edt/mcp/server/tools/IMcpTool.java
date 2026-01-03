@@ -12,6 +12,19 @@ import java.util.Map;
 public interface IMcpTool
 {
     /**
+     * Response content type for tool results.
+     */
+    enum ResponseType
+    {
+        /** Plain text response */
+        TEXT,
+        /** JSON response with structuredContent */
+        JSON,
+        /** Markdown response returned as EmbeddedResource with mimeType */
+        MARKDOWN
+    }
+    
+    /**
      * Returns the unique name of the tool.
      * This name is used in MCP protocol to identify the tool.
      * 
@@ -39,7 +52,32 @@ public interface IMcpTool
      * Executes the tool with the given parameters.
      * 
      * @param params map of parameter name to value
-     * @return result as JSON string
+     * @return result string (format depends on getResponseType())
      */
     String execute(Map<String, String> params);
+    
+    /**
+     * Returns the response content type for this tool.
+     * Default is MARKDOWN for better context efficiency.
+     * 
+     * @return response type
+     */
+    default ResponseType getResponseType()
+    {
+        return ResponseType.MARKDOWN;
+    }
+    
+    /**
+     * Returns the result file name for EmbeddedResource URI.
+     * Used when response type is MARKDOWN.
+     * Default returns tool name with .md extension.
+     * Override to provide dynamic file name based on parameters.
+     * 
+     * @param params the execution parameters
+     * @return file name with extension (e.g., "begin-transaction.md")
+     */
+    default String getResultFileName(Map<String, String> params)
+    {
+        return getName() + ".md"; //$NON-NLS-1$
+    }
 }

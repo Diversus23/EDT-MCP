@@ -186,13 +186,26 @@ public class McpServer
 
     /**
      * MCP request handler.
+     * Implements Streamable HTTP transport as per MCP 2025-11-25 specification.
      */
     private class McpHandler implements HttpHandler
     {
+        /** Event ID counter for SSE */
+        private long eventIdCounter = 0;
+        
         @Override
         public void handle(HttpExchange exchange) throws IOException
         {
             String method = exchange.getRequestMethod();
+            
+            // Validate Origin header for security (DNS rebinding prevention)
+            String origin = exchange.getRequestHeaders().getFirst("Origin"); //$NON-NLS-1$
+            if (origin != null && !isValidOrigin(origin))
+            {
+                Activator.logInfo("Invalid Origin header rejected: " + origin); //$NON-NLS-1$
+                sendResponse(exchange, 403, "{\"jsonrpc\": \"2.0\", \"error\": {\"code\": -32600, \"message\": \"Invalid Origin\"}}"); //$NON-NLS-1$
+                return;
+            }
             
             if ("POST".equals(method)) //$NON-NLS-1$
             {
@@ -200,12 +213,31 @@ public class McpServer
             }
             else if ("GET".equals(method)) //$NON-NLS-1$
             {
-                handleMcpInfo(exchange);
+                handleSseStream(exchange);
+            }
+            else if ("DELETE".equals(method)) //$NON-NLS-1$
+            {
+                // Session termination - accept but we don't track sessions currently
+                sendResponse(exchange, 200, ""); //$NON-NLS-1$
             }
             else
             {
                 sendResponse(exchange, 405, "{\"error\": \"Method not allowed\"}"); //$NON-NLS-1$
             }
+        }
+        
+        /**
+         * Validates Origin header for security.
+         */
+        private boolean isValidOrigin(String origin)
+        {
+            // Allow localhost origins and file:// origins
+            return origin.startsWith("http://localhost") || //$NON-NLS-1$
+                   origin.startsWith("http://127.0.0.1") || //$NON-NLS-1$
+                   origin.startsWith("https://localhost") || //$NON-NLS-1$
+                   origin.startsWith("https://127.0.0.1") || //$NON-NLS-1$
+                   origin.startsWith("file://") || //$NON-NLS-1$
+                   origin.startsWith("vscode-webview://"); //$NON-NLS-1$
         }
 
         private void handleMcpRequest(HttpExchange exchange) throws IOException
@@ -231,10 +263,21 @@ public class McpServer
             Activator.logInfo("MCP request body: " + requestBody); //$NON-NLS-1$
             
             String response;
+            boolean isInitialize = requestBody.contains("\"" + McpConstants.METHOD_INITIALIZE + "\""); //$NON-NLS-1$ //$NON-NLS-2$
 
             try
             {
                 response = protocolHandler.processRequest(requestBody);
+                
+                // null response means notification (no response needed)
+                if (response == null)
+                {
+                    Activator.logInfo("MCP notification processed, returning 202"); //$NON-NLS-1$
+                    exchange.sendResponseHeaders(202, -1);
+                    exchange.close();
+                    return;
+                }
+                
                 Activator.logInfo("MCP response: " + response.substring(0, Math.min(200, response.length())) + "..."); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception e)
@@ -244,19 +287,94 @@ public class McpServer
                     + e.getMessage() + "\"}, \"id\": null}"; //$NON-NLS-1$
             }
 
-            exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
-            sendResponse(exchange, 200, response);
+            // Check if client accepts SSE
+            String acceptHeader = exchange.getRequestHeaders().getFirst("Accept"); //$NON-NLS-1$
+            boolean acceptsSse = acceptHeader != null && acceptHeader.contains("text/event-stream"); //$NON-NLS-1$
+            
+            if (acceptsSse)
+            {
+                // Send response as SSE event
+                sendSseResponse(exchange, response, isInitialize);
+            }
+            else
+            {
+                // Send as plain JSON - add session header for initialize
+                if (isInitialize)
+                {
+                    exchange.getResponseHeaders().add(McpConstants.HEADER_SESSION_ID, generateSessionId());
+                }
+                exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
+                sendResponse(exchange, 200, response);
+            }
         }
-
-        private void handleMcpInfo(HttpExchange exchange) throws IOException
+        
+        /**
+         * Generates a simple session ID.
+         */
+        private String generateSessionId()
         {
-            String response = String.format(
-                "{\"name\": \"%s\", \"version\": \"%s\", \"edt_version\": \"%s\", \"status\": \"running\"}", //$NON-NLS-1$
-                McpConstants.SERVER_NAME,
-                McpConstants.PLUGIN_VERSION,
-                GetEdtVersionTool.getEdtVersion());
-            exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
-            sendResponse(exchange, 200, response);
+            return java.util.UUID.randomUUID().toString();
+        }
+        
+        /**
+         * Sends response as SSE event stream.
+         * As per MCP 2025-11-25: should include event ID for reconnection.
+         */
+        private void sendSseResponse(HttpExchange exchange, String response, boolean isInitialize) throws IOException
+        {
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream"); //$NON-NLS-1$ //$NON-NLS-2$
+            exchange.getResponseHeaders().add("Cache-Control", "no-cache"); //$NON-NLS-1$ //$NON-NLS-2$
+            exchange.getResponseHeaders().add("Connection", "keep-alive"); //$NON-NLS-1$ //$NON-NLS-2$
+            
+            // Add session ID for initialize response
+            if (isInitialize)
+            {
+                exchange.getResponseHeaders().add(McpConstants.HEADER_SESSION_ID, generateSessionId());
+            }
+            
+            // Build SSE message with event ID (per 2025-11-25 spec)
+            long eventId = ++eventIdCounter;
+            StringBuilder sseMessage = new StringBuilder();
+            sseMessage.append("id: ").append(eventId).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            sseMessage.append("data: ").append(response).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            
+            byte[] bytes = sseMessage.toString().getBytes(StandardCharsets.UTF_8);
+            
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = exchange.getResponseBody())
+            {
+                os.write(bytes);
+                os.flush();
+            }
+        }
+        
+        /**
+         * Handles GET request for SSE stream.
+         * As per spec: server MAY initiate SSE stream or return 405.
+         */
+        private void handleSseStream(HttpExchange exchange) throws IOException
+        {
+            String acceptHeader = exchange.getRequestHeaders().getFirst("Accept"); //$NON-NLS-1$
+            
+            if (acceptHeader != null && acceptHeader.contains("text/event-stream")) //$NON-NLS-1$
+            {
+                // Client wants SSE stream - we could support server-initiated messages here
+                // For now, return 405 as we don't use server-initiated notifications
+                Activator.logInfo("SSE GET request received - returning 405 (not supported)"); //$NON-NLS-1$
+                sendResponse(exchange, 405, "{\"error\": \"Server-initiated SSE not supported\"}"); //$NON-NLS-1$
+            }
+            else
+            {
+                // Return server info for plain GET requests
+                String response = String.format(
+                    "{\"name\": \"%s\", \"version\": \"%s\", \"edt_version\": \"%s\", \"protocol_version\": \"%s\", \"status\": \"running\"}", //$NON-NLS-1$
+                    McpConstants.SERVER_NAME,
+                    McpConstants.PLUGIN_VERSION,
+                    GetEdtVersionTool.getEdtVersion(),
+                    McpConstants.PROTOCOL_VERSION);
+                exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
+                sendResponse(exchange, 200, response);
+            }
         }
     }
 

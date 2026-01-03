@@ -82,12 +82,11 @@ public class GetBookmarksTool implements IMcpTool
      * @param projectName filter by project name (null for all)
      * @param filePath filter by file path substring
      * @param limit maximum number of results
-     * @return JSON string with bookmark details
+     * @return Markdown string with bookmark details
      */
     public static String getBookmarks(String projectName, String filePath, int limit)
     {
-        StringBuilder json = new StringBuilder();
-        json.append("{"); //$NON-NLS-1$
+        StringBuilder md = new StringBuilder();
         
         try
         {
@@ -100,10 +99,7 @@ public class GetBookmarksTool implements IMcpTool
                 IProject project = workspace.getRoot().getProject(projectName);
                 if (project == null || !project.exists())
                 {
-                    json.append("\"success\": false,"); //$NON-NLS-1$
-                    json.append("\"error\": \"Project not found: ").append(JsonUtils.escapeJson(projectName)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                    json.append("}"); //$NON-NLS-1$
-                    return json.toString();
+                    return "**Error:** Project not found: " + projectName; //$NON-NLS-1$
                 }
                 projects = new IProject[] { project };
             }
@@ -149,8 +145,6 @@ public class GetBookmarksTool implements IMcpTool
                         bookmark.message = marker.getAttribute(IMarker.MESSAGE, ""); //$NON-NLS-1$
                         bookmark.path = resourcePathStr;
                         bookmark.line = marker.getAttribute(IMarker.LINE_NUMBER, -1);
-                        bookmark.charStart = marker.getAttribute(IMarker.CHAR_START, -1);
-                        bookmark.charEnd = marker.getAttribute(IMarker.CHAR_END, -1);
                         
                         bookmarks.add(bookmark);
                     }
@@ -166,51 +160,58 @@ public class GetBookmarksTool implements IMcpTool
                 }
             }
             
-            // Build JSON response
-            json.append("\"success\": true,"); //$NON-NLS-1$
-            json.append("\"count\": ").append(bookmarks.size()).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"limit\": ").append(limit).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"hasMore\": ").append(bookmarks.size() >= limit).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"bookmarks\": ["); //$NON-NLS-1$
-            
-            boolean first = true;
-            for (BookmarkInfo bookmark : bookmarks)
+            // Build Markdown response
+            md.append("## Bookmarks\n\n"); //$NON-NLS-1$
+            md.append("**Found:** ").append(bookmarks.size()).append(" bookmarks"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (bookmarks.size() >= limit)
             {
-                if (!first)
-                {
-                    json.append(","); //$NON-NLS-1$
-                }
-                first = false;
-                
-                json.append("{"); //$NON-NLS-1$
-                json.append("\"project\": \"").append(JsonUtils.escapeJson(bookmark.project)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"message\": \"").append(JsonUtils.escapeJson(bookmark.message)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"path\": \"").append(JsonUtils.escapeJson(bookmark.path)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"line\": ").append(bookmark.line); //$NON-NLS-1$
-                
-                if (bookmark.charStart >= 0)
-                {
-                    json.append(",\"charStart\": ").append(bookmark.charStart); //$NON-NLS-1$
-                }
-                if (bookmark.charEnd >= 0)
-                {
-                    json.append(",\"charEnd\": ").append(bookmark.charEnd); //$NON-NLS-1$
-                }
-                
-                json.append("}"); //$NON-NLS-1$
+                md.append(" (limit: ").append(limit).append(", more available)"); //$NON-NLS-1$ //$NON-NLS-2$
             }
+            md.append("\n\n"); //$NON-NLS-1$
             
-            json.append("]"); //$NON-NLS-1$
+            if (bookmarks.isEmpty())
+            {
+                md.append("*No bookmarks found.*\n"); //$NON-NLS-1$
+            }
+            else
+            {
+                // Table header
+                md.append("| Project | Message | Path | Line |\n"); //$NON-NLS-1$
+                md.append("|---------|---------|------|------|\n"); //$NON-NLS-1$
+                
+                for (BookmarkInfo bookmark : bookmarks)
+                {
+                    md.append("| "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(bookmark.project));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(bookmark.message));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(bookmark.path));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(bookmark.line);
+                    md.append(" |\n"); //$NON-NLS-1$
+                }
+            }
         }
         catch (Exception e)
         {
             Activator.logError("Error getting bookmarks", e); //$NON-NLS-1$
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"").append(JsonUtils.escapeJson(e.getMessage())).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+            return "**Error:** " + e.getMessage(); //$NON-NLS-1$
         }
         
-        json.append("}"); //$NON-NLS-1$
-        return json.toString();
+        return md.toString();
+    }
+    
+    /**
+     * Escapes special Markdown characters in text.
+     */
+    private static String escapeMarkdown(String text)
+    {
+        if (text == null)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
     
     /**
@@ -222,7 +223,5 @@ public class GetBookmarksTool implements IMcpTool
         String message;
         String path;
         int line;
-        int charStart;
-        int charEnd;
     }
 }

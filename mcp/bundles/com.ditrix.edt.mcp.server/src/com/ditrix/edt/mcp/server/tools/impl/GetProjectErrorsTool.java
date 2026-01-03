@@ -86,23 +86,17 @@ public class GetProjectErrorsTool implements IMcpTool
      * @param severity filter by severity (ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL)
      * @param checkId filter by check ID substring
      * @param limit maximum number of results
-     * @return JSON string with error details
+     * @return Markdown formatted string with error details
      */
     public static String getProjectErrors(String projectName, String severity, String checkId, int limit)
     {
-        StringBuilder json = new StringBuilder();
-        json.append("{"); //$NON-NLS-1$
-        
         try
         {
             IMarkerManager markerManager = Activator.getDefault().getMarkerManager();
             
             if (markerManager == null)
             {
-                json.append("\"success\": false,"); //$NON-NLS-1$
-                json.append("\"error\": \"IMarkerManager service is not available\""); //$NON-NLS-1$
-                json.append("}"); //$NON-NLS-1$
-                return json.toString();
+                return "# Error\n\nIMarkerManager service is not available"; //$NON-NLS-1$
             }
             
             IWorkspace workspace = ResourcesPlugin.getWorkspace();
@@ -122,22 +116,14 @@ public class GetProjectErrorsTool implements IMcpTool
                 }
             }
             
-            IProject[] projects;
+            // Validate project if specified
             if (projectName != null && !projectName.isEmpty())
             {
                 IProject project = workspace.getRoot().getProject(projectName);
                 if (project == null || !project.exists())
                 {
-                    json.append("\"success\": false,"); //$NON-NLS-1$
-                    json.append("\"error\": \"Project not found: ").append(JsonUtils.escapeJson(projectName)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                    json.append("}"); //$NON-NLS-1$
-                    return json.toString();
+                    return "# Error\n\nProject not found: " + projectName; //$NON-NLS-1$
                 }
-                projects = new IProject[] { project };
-            }
-            else
-            {
-                projects = workspace.getRoot().getProjects();
             }
             
             // Collect errors from EDT MarkerManager
@@ -187,54 +173,62 @@ public class GetProjectErrorsTool implements IMcpTool
                 
                 // Create error info
                 ErrorInfo error = new ErrorInfo();
-                error.project = markerProject.getName();
                 error.checkId = markerCheckId != null ? markerCheckId : ""; //$NON-NLS-1$
                 error.message = marker.getMessage() != null ? marker.getMessage() : ""; //$NON-NLS-1$
                 error.severity = markerSeverity != null ? markerSeverity.name() : "NONE"; //$NON-NLS-1$
-                error.location = marker.getLocation() != null ? marker.getLocation() : ""; //$NON-NLS-1$
                 error.objectPresentation = marker.getObjectPresentation() != null ? 
                     marker.getObjectPresentation() : ""; //$NON-NLS-1$
                 
                 errors.add(error);
             });
             
-            // Build JSON response
-            json.append("\"success\": true,"); //$NON-NLS-1$
-            json.append("\"count\": ").append(errors.size()).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"limit\": ").append(limit).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"hasMore\": ").append(errors.size() >= limit).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"errors\": ["); //$NON-NLS-1$
+            // Build Markdown response for better readability and context efficiency
+            StringBuilder md = new StringBuilder();
             
-            boolean first = true;
-            for (ErrorInfo error : errors)
+            if (errors.isEmpty())
             {
-                if (!first)
+                md.append("# No Errors Found\n\n"); //$NON-NLS-1$
+                if (projectName != null && !projectName.isEmpty())
                 {
-                    json.append(","); //$NON-NLS-1$
+                    md.append("Project: **").append(projectName).append("**\n"); //$NON-NLS-1$ //$NON-NLS-2$
                 }
-                first = false;
+                if (severity != null && !severity.isEmpty())
+                {
+                    md.append("Severity filter: ").append(severity).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                md.append("\nNo configuration problems match the specified criteria."); //$NON-NLS-1$
+            }
+            else
+            {
+                md.append("# Configuration Problems\n\n"); //$NON-NLS-1$
+                md.append("**Found:** ").append(errors.size()); //$NON-NLS-1$
+                if (errors.size() >= limit)
+                {
+                    md.append("+ (limited to ").append(limit).append(")"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                md.append("\n\n"); //$NON-NLS-1$
                 
-                json.append("{"); //$NON-NLS-1$
-                json.append("\"project\": \"").append(JsonUtils.escapeJson(error.project)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"checkId\": \"").append(JsonUtils.escapeJson(error.checkId)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"message\": \"").append(JsonUtils.escapeJson(error.message)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"severity\": \"").append(error.severity).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"location\": \"").append(JsonUtils.escapeJson(error.location)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"object\": \"").append(JsonUtils.escapeJson(error.objectPresentation)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("}"); //$NON-NLS-1$
+                // Group by severity for better overview
+                md.append("| Severity | Check ID | Message | Location |\n"); //$NON-NLS-1$
+                md.append("|----------|----------|---------|----------|\n"); //$NON-NLS-1$
+                
+                for (ErrorInfo error : errors)
+                {
+                    md.append("| ").append(error.severity); //$NON-NLS-1$
+                    md.append(" | `").append(error.checkId).append("`"); //$NON-NLS-1$ //$NON-NLS-2$
+                    md.append(" | ").append(error.message.replace("|", "\\|").replace("\n", " ")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                    md.append(" | ").append(error.objectPresentation.replace("|", "\\|")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    md.append(" |\n"); //$NON-NLS-1$
+                }
             }
             
-            json.append("]"); //$NON-NLS-1$
+            return md.toString();
         }
         catch (Exception e)
         {
             Activator.logError("Error getting project errors", e); //$NON-NLS-1$
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"").append(JsonUtils.escapeJson(e.getMessage())).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+            return "# Error\n\nFailed to get project errors: " + e.getMessage(); //$NON-NLS-1$
         }
-        
-        json.append("}"); //$NON-NLS-1$
-        return json.toString();
     }
     
     /**
@@ -242,11 +236,9 @@ public class GetProjectErrorsTool implements IMcpTool
      */
     private static class ErrorInfo
     {
-        String project;
         String checkId;
         String message;
         String severity;
-        String location;
         String objectPresentation;
     }
 }

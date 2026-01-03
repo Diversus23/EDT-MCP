@@ -171,4 +171,85 @@ public final class JsonUtils
         }
         return params.get(argumentName);
     }
+    
+    /**
+     * Extracts the JSON-RPC id from request body.
+     * The id can be a number, string, or null.
+     * 
+     * @param requestBody the JSON body
+     * @return the id as string, or "1" if not found
+     */
+    public static String extractRequestId(String requestBody)
+    {
+        try
+        {
+            // Look for "id": pattern (can be number, string, or null)
+            String searchPattern = "\"id\":"; //$NON-NLS-1$
+            int idx = requestBody.indexOf(searchPattern);
+            if (idx < 0)
+            {
+                // Also try with space
+                searchPattern = "\"id\" :"; //$NON-NLS-1$
+                idx = requestBody.indexOf(searchPattern);
+            }
+            if (idx < 0)
+            {
+                return "1"; //$NON-NLS-1$
+            }
+            
+            // Skip whitespace after colon
+            int valueStart = idx + searchPattern.length();
+            while (valueStart < requestBody.length() && 
+                   Character.isWhitespace(requestBody.charAt(valueStart)))
+            {
+                valueStart++;
+            }
+            
+            if (valueStart >= requestBody.length())
+            {
+                return "1"; //$NON-NLS-1$
+            }
+            
+            char firstChar = requestBody.charAt(valueStart);
+            
+            // If it's a string (starts with quote)
+            if (firstChar == '"')
+            {
+                int valueEnd = requestBody.indexOf("\"", valueStart + 1); //$NON-NLS-1$
+                if (valueEnd > valueStart)
+                {
+                    // Return the quoted string as id
+                    return "\"" + requestBody.substring(valueStart + 1, valueEnd) + "\""; //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            // If it's a number or null
+            else
+            {
+                StringBuilder idBuilder = new StringBuilder();
+                for (int i = valueStart; i < requestBody.length(); i++)
+                {
+                    char c = requestBody.charAt(i);
+                    if (Character.isDigit(c) || c == '-' || c == '.' || 
+                        Character.isLetter(c)) // for null
+                    {
+                        idBuilder.append(c);
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+                String id = idBuilder.toString();
+                if (!id.isEmpty())
+                {
+                    return id;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            // Fall through to default
+        }
+        return "1"; //$NON-NLS-1$
+    }
 }

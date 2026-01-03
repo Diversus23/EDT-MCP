@@ -10,7 +10,6 @@ import org.eclipse.core.resources.IWorkspace;
 import org.eclipse.core.resources.ResourcesPlugin;
 
 import com.ditrix.edt.mcp.server.Activator;
-import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 
 /**
@@ -47,83 +46,107 @@ public class ListProjectsTool implements IMcpTool
     /**
      * Returns list of workspace projects with their properties.
      * 
-     * @return JSON string with project list
+     * @return Markdown string with project list
      */
     public static String listProjects()
     {
-        StringBuilder json = new StringBuilder();
-        json.append("["); //$NON-NLS-1$
+        StringBuilder md = new StringBuilder();
         
         try
         {
             IWorkspace workspace = ResourcesPlugin.getWorkspace();
             IProject[] projects = workspace.getRoot().getProjects();
             
-            boolean first = true;
-            for (IProject project : projects)
+            md.append("## Workspace Projects\n\n"); //$NON-NLS-1$
+            md.append("**Total:** ").append(projects.length).append(" projects\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            
+            if (projects.length == 0)
             {
-                if (!first)
-                {
-                    json.append(","); //$NON-NLS-1$
-                }
-                first = false;
+                md.append("*No projects found.*\n"); //$NON-NLS-1$
+            }
+            else
+            {
+                // Table header
+                md.append("| Name | Path | Open | EDT Project | Natures |\n"); //$NON-NLS-1$
+                md.append("|------|------|------|-------------|--------|\n"); //$NON-NLS-1$
                 
-                json.append("{"); //$NON-NLS-1$
-                json.append("\"name\": \"").append(JsonUtils.escapeJson(project.getName())).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"path\": \"").append(JsonUtils.escapeJson(project.getLocation() != null ?  //$NON-NLS-1$
-                    project.getLocation().toOSString() : "")).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"open\": ").append(project.isOpen()).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"accessible\": ").append(project.isAccessible()); //$NON-NLS-1$
-                
-                // Try to get additional EDT-specific properties
-                if (project.isOpen())
+                for (IProject project : projects)
                 {
-                    try
+                    md.append("| "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(project.getName()));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(project.getLocation() != null ? 
+                        project.getLocation().toOSString() : "")); //$NON-NLS-1$
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(project.isOpen() ? "Yes" : "No"); //$NON-NLS-1$ //$NON-NLS-2$
+                    md.append(" | "); //$NON-NLS-1$
+                    
+                    // EDT project check and natures
+                    String edtStatus = "-"; //$NON-NLS-1$
+                    String naturesStr = "-"; //$NON-NLS-1$
+                    
+                    if (project.isOpen())
                     {
-                        // Check if it's a 1C:EDT project by nature
-                        boolean isEdtProject = project.hasNature("com._1c.g5.v8.dt.core.V8ConfigurationNature") || //$NON-NLS-1$
-                                               project.hasNature("com._1c.g5.v8.dt.core.V8ExtensionNature"); //$NON-NLS-1$
-                        json.append(",\"edtProject\": ").append(isEdtProject); //$NON-NLS-1$
-                        
-                        // Get project description
-                        String comment = project.getDescription().getComment();
-                        if (comment != null && !comment.isEmpty())
+                        try
                         {
-                            json.append(",\"description\": \"").append(JsonUtils.escapeJson(comment)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                        }
-                        
-                        // Get natures
-                        String[] natures = project.getDescription().getNatureIds();
-                        if (natures.length > 0)
-                        {
-                            json.append(",\"natures\": ["); //$NON-NLS-1$
-                            for (int i = 0; i < natures.length; i++)
+                            boolean isEdtProject = project.hasNature("com._1c.g5.v8.dt.core.V8ConfigurationNature") || //$NON-NLS-1$
+                                                   project.hasNature("com._1c.g5.v8.dt.core.V8ExtensionNature"); //$NON-NLS-1$
+                            edtStatus = isEdtProject ? "Yes" : "No"; //$NON-NLS-1$ //$NON-NLS-2$
+                            
+                            String[] natures = project.getDescription().getNatureIds();
+                            if (natures.length > 0)
                             {
-                                if (i > 0)
+                                // Show abbreviated natures
+                                StringBuilder naturesBuilder = new StringBuilder();
+                                for (int i = 0; i < Math.min(natures.length, 3); i++)
                                 {
-                                    json.append(","); //$NON-NLS-1$
+                                    if (i > 0)
+                                    {
+                                        naturesBuilder.append(", "); //$NON-NLS-1$
+                                    }
+                                    // Get short nature name
+                                    String nature = natures[i];
+                                    int lastDot = nature.lastIndexOf('.');
+                                    naturesBuilder.append(lastDot > 0 ? nature.substring(lastDot + 1) : nature);
                                 }
-                                json.append("\"").append(JsonUtils.escapeJson(natures[i])).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+                                if (natures.length > 3)
+                                {
+                                    naturesBuilder.append("...+").append(natures.length - 3); //$NON-NLS-1$
+                                }
+                                naturesStr = naturesBuilder.toString();
                             }
-                            json.append("]"); //$NON-NLS-1$
+                        }
+                        catch (Exception e)
+                        {
+                            // Ignore errors for specific project
                         }
                     }
-                    catch (Exception e)
-                    {
-                        // Ignore errors for specific project
-                    }
+                    
+                    md.append(edtStatus);
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(naturesStr));
+                    md.append(" |\n"); //$NON-NLS-1$
                 }
-                
-                json.append("}"); //$NON-NLS-1$
             }
         }
         catch (Exception e)
         {
             Activator.logError("Failed to list projects", e); //$NON-NLS-1$
-            return "[{\"error\": \"" + JsonUtils.escapeJson(e.getMessage()) + "\"}]"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "**Error:** " + e.getMessage(); //$NON-NLS-1$
         }
         
-        json.append("]"); //$NON-NLS-1$
-        return json.toString();
+        return md.toString();
+    }
+    
+    /**
+     * Escapes special Markdown characters in text.
+     */
+    private static String escapeMarkdown(String text)
+    {
+        if (text == null)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
 }

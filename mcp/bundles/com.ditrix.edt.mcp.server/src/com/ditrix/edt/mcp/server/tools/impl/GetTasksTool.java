@@ -88,12 +88,11 @@ public class GetTasksTool implements IMcpTool
      * @param filePath filter by file path substring
      * @param priority filter by priority (high, normal, low)
      * @param limit maximum number of results
-     * @return JSON string with task details
+     * @return Markdown string with task details
      */
     public static String getTasks(String projectName, String filePath, String priority, int limit)
     {
-        StringBuilder json = new StringBuilder();
-        json.append("{"); //$NON-NLS-1$
+        StringBuilder md = new StringBuilder();
         
         try
         {
@@ -124,10 +123,7 @@ public class GetTasksTool implements IMcpTool
                 IProject project = workspace.getRoot().getProject(projectName);
                 if (project == null || !project.exists())
                 {
-                    json.append("\"success\": false,"); //$NON-NLS-1$
-                    json.append("\"error\": \"Project not found: ").append(JsonUtils.escapeJson(projectName)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                    json.append("}"); //$NON-NLS-1$
-                    return json.toString();
+                    return "**Error:** Project not found: " + projectName; //$NON-NLS-1$
                 }
                 projects = new IProject[] { project };
             }
@@ -157,53 +153,60 @@ public class GetTasksTool implements IMcpTool
                 }
             }
             
-            // Build JSON response
-            json.append("\"success\": true,"); //$NON-NLS-1$
-            json.append("\"count\": ").append(tasks.size()).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"limit\": ").append(limit).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"hasMore\": ").append(tasks.size() >= limit).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"tasks\": ["); //$NON-NLS-1$
-            
-            boolean first = true;
-            for (TaskInfo task : tasks)
+            // Build Markdown response
+            md.append("## Tasks\n\n"); //$NON-NLS-1$
+            md.append("**Found:** ").append(tasks.size()).append(" tasks"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (tasks.size() >= limit)
             {
-                if (!first)
-                {
-                    json.append(","); //$NON-NLS-1$
-                }
-                first = false;
-                
-                json.append("{"); //$NON-NLS-1$
-                json.append("\"project\": \"").append(JsonUtils.escapeJson(task.project)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"message\": \"").append(JsonUtils.escapeJson(task.message)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"path\": \"").append(JsonUtils.escapeJson(task.path)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"line\": ").append(task.line).append(","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"priority\": \"").append(task.priority).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-                json.append("\"type\": \"").append(JsonUtils.escapeJson(task.type)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
-                
-                if (task.charStart >= 0)
-                {
-                    json.append(",\"charStart\": ").append(task.charStart); //$NON-NLS-1$
-                }
-                if (task.charEnd >= 0)
-                {
-                    json.append(",\"charEnd\": ").append(task.charEnd); //$NON-NLS-1$
-                }
-                
-                json.append("}"); //$NON-NLS-1$
+                md.append(" (limit: ").append(limit).append(", more available)"); //$NON-NLS-1$ //$NON-NLS-2$
             }
+            md.append("\n\n"); //$NON-NLS-1$
             
-            json.append("]"); //$NON-NLS-1$
+            if (tasks.isEmpty())
+            {
+                md.append("*No tasks found.*\n"); //$NON-NLS-1$
+            }
+            else
+            {
+                // Table header
+                md.append("| Type | Priority | Message | Path | Line |\n"); //$NON-NLS-1$
+                md.append("|------|----------|---------|------|------|\n"); //$NON-NLS-1$
+                
+                for (TaskInfo task : tasks)
+                {
+                    md.append("| "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(task.type));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(task.priority));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(task.message));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(escapeMarkdown(task.path));
+                    md.append(" | "); //$NON-NLS-1$
+                    md.append(task.line);
+                    md.append(" |\n"); //$NON-NLS-1$
+                }
+            }
         }
         catch (Exception e)
         {
             Activator.logError("Error getting tasks", e); //$NON-NLS-1$
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"").append(JsonUtils.escapeJson(e.getMessage())).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+            return "**Error:** " + e.getMessage(); //$NON-NLS-1$
         }
         
-        json.append("}"); //$NON-NLS-1$
-        return json.toString();
+        return md.toString();
+    }
+    
+    /**
+     * Escapes special Markdown characters in text.
+     */
+    private static String escapeMarkdown(String text)
+    {
+        if (text == null)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
     
     /**
@@ -246,12 +249,9 @@ public class GetTasksTool implements IMcpTool
                 
                 // Create task info
                 TaskInfo task = new TaskInfo();
-                task.project = project.getName();
                 task.message = marker.getAttribute(IMarker.MESSAGE, ""); //$NON-NLS-1$
                 task.path = resourcePathStr;
                 task.line = marker.getAttribute(IMarker.LINE_NUMBER, -1);
-                task.charStart = marker.getAttribute(IMarker.CHAR_START, -1);
-                task.charEnd = marker.getAttribute(IMarker.CHAR_END, -1);
                 task.priority = getPriorityString(markerPriority);
                 task.type = getTaskType(task.message);
                 
@@ -316,13 +316,10 @@ public class GetTasksTool implements IMcpTool
      */
     private static class TaskInfo
     {
-        String project;
         String message;
         String path;
         String priority;
         String type;
         int line;
-        int charStart;
-        int charEnd;
     }
 }

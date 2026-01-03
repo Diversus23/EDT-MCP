@@ -47,6 +47,17 @@ public class GetCheckDescriptionTool implements IMcpTool
     }
     
     @Override
+    public String getResultFileName(Map<String, String> params)
+    {
+        String checkId = JsonUtils.extractStringArgument(params, "checkId"); //$NON-NLS-1$
+        if (checkId != null && !checkId.isEmpty())
+        {
+            return checkId + ".md"; //$NON-NLS-1$
+        }
+        return getName() + ".md"; //$NON-NLS-1$
+    }
+    
+    @Override
     public String execute(Map<String, String> params)
     {
         String checkId = JsonUtils.extractStringArgument(params, "checkId"); //$NON-NLS-1$
@@ -57,20 +68,14 @@ public class GetCheckDescriptionTool implements IMcpTool
      * Gets check description from the configured folder.
      * 
      * @param checkId the check ID
-     * @return JSON string with check description or error
+     * @return Markdown string with check description or error
      */
     public static String getCheckDescription(String checkId)
     {
-        StringBuilder json = new StringBuilder();
-        json.append("{"); //$NON-NLS-1$
-        
         // Validate checkId parameter
         if (checkId == null || checkId.isEmpty())
         {
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"checkId parameter is required\""); //$NON-NLS-1$
-            json.append("}"); //$NON-NLS-1$
-            return json.toString();
+            return "**Error:** checkId parameter is required"; //$NON-NLS-1$
         }
         
         try
@@ -81,31 +86,21 @@ public class GetCheckDescriptionTool implements IMcpTool
             
             if (checksFolder == null || checksFolder.isEmpty())
             {
-                json.append("\"success\": false,"); //$NON-NLS-1$
-                json.append("\"error\": \"Check descriptions folder is not configured. "); //$NON-NLS-1$
-                json.append("Please set it in Preferences -> MCP Server.\""); //$NON-NLS-1$
-                json.append("}"); //$NON-NLS-1$
-                return json.toString();
+                return "**Error:** Check descriptions folder is not configured.\n\n" + //$NON-NLS-1$
+                       "Please set it in Preferences -> MCP Server."; //$NON-NLS-1$
             }
             
             Path folderPath = Paths.get(checksFolder);
             if (!Files.exists(folderPath) || !Files.isDirectory(folderPath))
             {
-                json.append("\"success\": false,"); //$NON-NLS-1$
-                json.append("\"error\": \"Check descriptions folder does not exist: "); //$NON-NLS-1$
-                json.append(JsonUtils.escapeJson(checksFolder)).append("\""); //$NON-NLS-1$
-                json.append("}"); //$NON-NLS-1$
-                return json.toString();
+                return "**Error:** Check descriptions folder does not exist: " + checksFolder; //$NON-NLS-1$
             }
             
             // Sanitize checkId to prevent path traversal
             String sanitizedCheckId = checkId.replaceAll("[^a-zA-Z0-9_-]", ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (!sanitizedCheckId.equals(checkId))
             {
-                json.append("\"success\": false,"); //$NON-NLS-1$
-                json.append("\"error\": \"Invalid checkId format. Only alphanumeric characters, dashes and underscores are allowed.\""); //$NON-NLS-1$
-                json.append("}"); //$NON-NLS-1$
-                return json.toString();
+                return "**Error:** Invalid checkId format. Only alphanumeric characters, dashes and underscores are allowed."; //$NON-NLS-1$
             }
             
             // Try to find the file with .md extension
@@ -121,36 +116,22 @@ public class GetCheckDescriptionTool implements IMcpTool
                 }
                 else
                 {
-                    json.append("\"success\": false,"); //$NON-NLS-1$
-                    json.append("\"error\": \"Check description not found for: "); //$NON-NLS-1$
-                    json.append(JsonUtils.escapeJson(checkId)).append("\""); //$NON-NLS-1$
-                    json.append("}"); //$NON-NLS-1$
-                    return json.toString();
+                    return "**Error:** Check description not found for: " + checkId; //$NON-NLS-1$
                 }
             }
             
-            // Read file content
-            String content = Files.readString(checkFile, StandardCharsets.UTF_8);
-            
-            json.append("\"success\": true,"); //$NON-NLS-1$
-            json.append("\"checkId\": \"").append(JsonUtils.escapeJson(checkId)).append("\","); //$NON-NLS-1$ //$NON-NLS-2$
-            json.append("\"description\": \"").append(JsonUtils.escapeJson(content)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+            // Read and return file content directly (it's already Markdown)
+            return Files.readString(checkFile, StandardCharsets.UTF_8);
         }
         catch (IOException e)
         {
             Activator.logError("Error reading check description for: " + checkId, e); //$NON-NLS-1$
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"Failed to read check description: "); //$NON-NLS-1$
-            json.append(JsonUtils.escapeJson(e.getMessage())).append("\""); //$NON-NLS-1$
+            return "**Error:** Failed to read check description: " + e.getMessage(); //$NON-NLS-1$
         }
         catch (Exception e)
         {
             Activator.logError("Error getting check description", e); //$NON-NLS-1$
-            json.append("\"success\": false,"); //$NON-NLS-1$
-            json.append("\"error\": \"").append(JsonUtils.escapeJson(e.getMessage())).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+            return "**Error:** " + e.getMessage(); //$NON-NLS-1$
         }
-        
-        json.append("}"); //$NON-NLS-1$
-        return json.toString();
     }
 }
