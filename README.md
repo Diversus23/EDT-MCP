@@ -10,6 +10,7 @@ MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (C
 - 📝 **Check Descriptions** - Get check documentation from markdown files
 - 🔄 **Project Revalidation** - Trigger revalidation when validation gets stuck
 - 🔖 **Bookmarks & Tasks** - Access bookmarks and TODO/FIXME markers
+- 💡 **Content Assist** - Get type info, method hints and platform documentation at any code position
 - 🎯 **Status Bar** - Real-time server status indicator with request counter
 
 ## Installation
@@ -43,33 +44,6 @@ Create `.vscode/mcp.json`:
   }
 }
 ```
-
-### Cursor IDE
-
-Create `.cursor/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "EDT MCP Server": {
-      "url": "http://localhost:8765/mcp"
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Add to `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "EDT MCP Server": {
-      "url": "http://localhost:8765/mcp"
-    }
-  }
-}
-```
-
 ## Available Tools
 
 | Tool | Description |
