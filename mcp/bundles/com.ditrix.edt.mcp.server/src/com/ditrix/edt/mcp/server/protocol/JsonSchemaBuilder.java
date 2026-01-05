@@ -99,6 +99,40 @@ public class JsonSchemaBuilder
     }
     
     /**
+     * Adds a boolean property to the schema.
+     * 
+     * @param name property name
+     * @param description property description
+     * @return this builder
+     */
+    public JsonSchemaBuilder booleanProperty(String name, String description)
+    {
+        return booleanProperty(name, description, false);
+    }
+    
+    /**
+     * Adds a boolean property to the schema.
+     * 
+     * @param name property name
+     * @param description property description
+     * @param required whether property is required
+     * @return this builder
+     */
+    public JsonSchemaBuilder booleanProperty(String name, String description, boolean required)
+    {
+        Map<String, Object> prop = new LinkedHashMap<>();
+        prop.put("type", "boolean"); //$NON-NLS-1$ //$NON-NLS-2$
+        prop.put("description", description); //$NON-NLS-1$
+        properties.put(name, prop);
+        
+        if (required)
+        {
+            this.required.add(name);
+        }
+        return this;
+    }
+    
+    /**
      * Adds an array property with string items to the schema.
      * 
      * @param name property name

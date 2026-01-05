@@ -44,6 +44,33 @@ Create `.vscode/mcp.json`:
   }
 }
 ```
+
+### Cursor IDE
+
+Create `.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "EDT MCP Server": {
+      "url": "http://localhost:8765/mcp"
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "EDT MCP Server": {
+      "url": "http://localhost:8765/mcp"
+    }
+  }
+}
+```
+
 ## Available Tools
 
 | Tool | Description |
@@ -59,6 +86,9 @@ Create `.vscode/mcp.json`:
 | `get_tasks` | Returns TODO/FIXME task markers |
 | `get_check_description` | Returns check documentation from .md files |
 | `get_content_assist` | Get content assist proposals (type info, method hints) |
+| `get_platform_documentation` | Get platform type documentation (methods, properties, constructors) |
+| `get_metadata_objects` | Get list of metadata objects from 1C configuration |
+| `get_metadata_details` | Get detailed properties of metadata objects (attributes, tabular sections, etc.) |
 
 ### Content Assist Tool
 
@@ -71,39 +101,46 @@ Create `.vscode/mcp.json`:
 | `filePath` | Yes | Path relative to `src/` folder (e.g. `CommonModules/MyModule/Module.bsl`) |
 | `line` | Yes | Line number (1-based) |
 | `column` | Yes | Column number (1-based) |
-| `limit` | No | Maximum proposals to return (default: 50) |
+| `limit` | No | Maximum proposals to return (default: from preferences) |
+| `offset` | No | Skip first N proposals (for pagination, default: 0) |
+| `contains` | No | Filter by display string containing these substrings (comma-separated, e.g. `Insert,Add`) |
+| `extendedDocumentation` | No | Return full documentation (default: false, only display string) |
 
 **Important Notes:**
 1. **Save the file first** - EDT must read the current content from disk to provide accurate proposals
 2. **Column position** - Place cursor after the dot (`.`) for method/property suggestions
-3. **Works for:**
+3. **Pagination** - Use `offset` to get next batch of proposals (e.g., first call with limit=5, second call with offset=5, limit=5)
+4. **Filtering** - Use `contains` to filter by method/property name (case-insensitive)
+5. **Works for:**
    - Global platform methods (e.g. `NStr(`, `Format(`)
    - Methods after dot (e.g. `Structure.Insert`, `Array.Add`)
    - Object properties and fields
    - Configuration objects and modules
 
-**Example - Get methods for Structure:**
+**Example - Get methods for Structure with filter:**
 ```json
 {
   "projectName": "MyProject",
   "filePath": "CommonModules/MyCommonModule/Module.bsl",
   "line": 15,
-  "column": 12
+  "column": 12,
+  "contains": "Insert,Add",
+  "extendedDocumentation": true
 }
 ```
 
-If line 15 contains `MyStruct.` and cursor is after the dot, returns:
+Returns only methods containing "Insert" or "Add" with full documentation:
 ```json
 {
   "success": true,
+  "totalProposals": 8,
+  "filteredOut": 6,
+  "skipped": 0,
+  "returnedProposals": 2,
   "proposals": [
     {
       "displayString": "Insert(Key) ~ Structure",
       "documentation": "Procedure Structure.Insert(Key, [Value])..."
-    },
-    {
-      "displayString": "Property(Key) : <Boolean> ~ Structure", 
-      "documentation": "Function <Boolean> Structure.Property(Key, [ValueFound])..."
     }
   ]
 }
@@ -115,6 +152,77 @@ If line 15 contains `MyStruct.` and cursor is after the dot, returns:
 - **`revalidate_objects`**: Revalidates specific metadata objects by their FQN:
   - `Document.MyDocument`, `Catalog.MyCatalog`, `CommonModule.MyModule`
   - `Document.MyDoc.Form.MyForm` for nested objects
+
+### Platform Documentation Tool
+
+**`get_platform_documentation`** - Get documentation for platform types (ValueTable, Array, Structure, Query, etc.)
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `typeName` | Yes | Platform type name (e.g. `ValueTable`, `Array`, `Structure`) |
+| `projectName` | No | EDT project name (uses first available project if not specified) |
+| `memberName` | No | Filter by member name (partial match) |
+| `memberType` | No | Filter: `method`, `property`, `constructor`, `event`, `all` (default: `all`) |
+| `language` | No | Output language: `en` or `ru` (default: `en`) |
+| `limit` | No | Maximum results (default: 50) |
+
+**Example:**
+```json
+{
+  "typeName": "ValueTable",
+  "memberType": "method",
+  "memberName": "Add",
+  "language": "ru"
+}
+```
+
+### Metadata Objects Tool
+
+**`get_metadata_objects`** - Get list of metadata objects from 1C configuration.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `projectName` | Yes | EDT project name |
+| `metadataType` | No | Filter: `all`, `documents`, `catalogs`, `informationRegisters`, `accumulationRegisters`, `commonModules`, `enums`, `constants`, `reports`, `dataProcessors`, `exchangePlans`, `businessProcesses`, `tasks`, `commonAttributes`, `eventSubscriptions`, `scheduledJobs` (default: `all`) |
+| `nameFilter` | No | Partial name match filter (case-insensitive) |
+| `limit` | No | Maximum results (default: 100) |
+| `language` | No | Language code for synonyms (e.g. `en`, `ru`). Uses configuration default if not specified |
+
+**Example:**
+```json
+{
+  "projectName": "MyProject",
+  "metadataType": "documents",
+  "nameFilter": "Sales"
+}
+```
+
+Returns markdown table with columns: Name, Synonym, Comment, Type, ObjectModule, ManagerModule.
+
+### Metadata Details Tool
+
+**`get_metadata_details`** - Get detailed properties of metadata objects.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `projectName` | Yes | EDT project name |
+| `objectFqns` | Yes | Array of FQNs (e.g. `["Catalog.Products", "Document.SalesOrder"]`) |
+| `full` | No | Return all properties (`true`) or only key info (`false`). Default: `false` |
+| `language` | No | Language code for synonyms. Uses configuration default if not specified |
+
+**Example:**
+```json
+{
+  "projectName": "MyProject",
+  "objectFqns": ["Document.SalesOrder", "Catalog.Products"],
+  "full": true
+}
+```
+
+Returns markdown with detailed object properties, attributes, tabular sections, forms, commands.
 
 ### Output Formats
 
@@ -144,12 +252,49 @@ Click the status indicator in EDT status bar:
 
 ## Version History
 
+### 1.9.0
+- **Improved**: Enhanced EObject formatting in metadata tools using new `EObjectInspector` utility
+  - Smart detection of simple value holders (enums, wrappers) vs complex objects needing expansion
+  - Automatic extraction of primary values from wrapper classes (e.g., StandardCommandGroup → category enum)
+  - EMF-based detection without hardcoded class names using EAttribute/EReference analysis
+  - Better formatting for StandardCommandGroup, Color, Picture, and other wrapper types
+- **Internal**: New `EObjectInspector` utility class for EMF EObject type analysis
+  - `getFormatStyle()` - Determines SIMPLE_VALUE, REFERENCE, or EXPAND formatting
+  - `isSimpleValueHolder()` - Checks if EClass/EObject is a simple wrapper
+  - `getPrimaryValue()` - Extracts meaningful value from wrapper objects
+  - `formatReference()` - Smart reference formatting for any EObject type
+- **Refactored**: `AbstractMetadataFormatter` and `UniversalMetadataFormatter` now use EObjectInspector
+
+### 1.8.0
+- **New**: `get_metadata_objects` tool - Get list of metadata objects from 1C configuration
+  - Returns Name, Synonym, Comment, Type, ObjectModule, ManagerModule for each object
+  - Supports filtering by metadata type (documents, catalogs, registers, commonModules, commonAttributes, eventSubscriptions, scheduledJobs, etc.)
+  - Supports partial name filtering (case-insensitive)
+  - Uses configuration default language for synonyms
+- **New**: `get_metadata_details` tool - Get detailed properties of metadata objects
+  - Accepts array of FQNs (e.g. `["Catalog.Products", "Document.SalesOrder"]`)
+  - `full` mode for complete property details
+  - Type-specific properties (Document: posting, Catalog: hierarchy, Register: periodicity, etc.)
+
+### 1.7.0
+- **New**: `get_platform_documentation` tool - Get platform type documentation
+  - Returns methods, properties, constructors, events with full documentation
+  - Supports all platform types: ValueTable, Array, Structure, Query, Map, etc.
+  - Filter by member name or type (method/property/constructor/event)
+  - Bilingual output (English/Russian)
+  - Uses EDT's IEObjectProvider with TYPE provider for accurate results
+
 ### 1.6.16
 - **New**: `get_content_assist` tool - Get content assist proposals at any code position
   - Returns type information, methods, properties with full platform documentation
   - Supports global methods and dot-notation methods
+  - Pagination with `offset` parameter for large result sets
+  - Filtering with `contains` parameter (case-insensitive, comma-separated)
+  - Optional extended documentation (default: disabled for faster responses)
   - Uses EDT's ICompletionProposalExtension5 for async documentation retrieval
   - HTML documentation converted to Markdown using CopyDown library
+- **Refactored**: Extracted common `escapeForTable()` to `MarkdownUtils` class
+- **Fixed**: Removed dead code (`tools/BuildUtils.java`)
 
 ### 1.6.10
 - **Refactored**: All JSON responses now use Gson serialization instead of manual StringBuilder
@@ -228,4 +373,4 @@ Click the status indicator in EDT status bar:
 Copyright (c) 2025 DitriX. All rights reserved.
 
 ---
-*EDT MCP Server v1.6.16*
+*EDT MCP Server v1.9.0*

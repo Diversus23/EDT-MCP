@@ -19,6 +19,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
 
 /**
@@ -225,8 +226,8 @@ public class GetProjectErrorsTool implements IMcpTool
                 {
                     md.append("| ").append(error.severity); //$NON-NLS-1$
                     md.append(" | `").append(error.checkId).append("`"); //$NON-NLS-1$ //$NON-NLS-2$
-                    md.append(" | ").append(error.message.replace("|", "\\|").replace("\n", " ")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-                    md.append(" | ").append(error.objectPresentation.replace("|", "\\|")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    md.append(" | ").append(MarkdownUtils.escapeForTable(error.message)); //$NON-NLS-1$
+                    md.append(" | ").append(MarkdownUtils.escapeForTable(error.objectPresentation)); //$NON-NLS-1$
                     md.append(" |\n"); //$NON-NLS-1$
                 }
             }

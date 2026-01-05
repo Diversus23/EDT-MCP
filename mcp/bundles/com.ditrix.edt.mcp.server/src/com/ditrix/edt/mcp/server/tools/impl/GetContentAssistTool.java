@@ -47,9 +47,6 @@ public class GetContentAssistTool implements IMcpTool
 {
     public static final String NAME = "get_content_assist"; //$NON-NLS-1$
     
-    /** Default limit for number of proposals returned */
-    private static final int DEFAULT_LIMIT = 50;
-    
     @Override
     public String getName()
     {
@@ -71,7 +68,10 @@ public class GetContentAssistTool implements IMcpTool
             .stringProperty("filePath", "Path to BSL file relative to project's src folder (e.g. 'CommonModules/MyModule/Module.bsl')", true) //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("line", "Line number (1-based)", true) //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("column", "Column number (1-based)", true) //$NON-NLS-1$ //$NON-NLS-2$
-            .integerProperty("limit", "Maximum number of proposals to return (default: 50)") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("limit", "Maximum number of proposals to return (default: from preferences)") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("offset", "Skip first N proposals (default: 0, for pagination)") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("contains", "Filter proposals by display string containing these substrings (comma-separated, e.g. 'Insert,Add')") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("extendedDocumentation", "Return full documentation (default: false, only display string)") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
     
@@ -89,6 +89,9 @@ public class GetContentAssistTool implements IMcpTool
         String lineStr = JsonUtils.extractStringArgument(params, "line"); //$NON-NLS-1$
         String columnStr = JsonUtils.extractStringArgument(params, "column"); //$NON-NLS-1$
         String limitStr = JsonUtils.extractStringArgument(params, "limit"); //$NON-NLS-1$
+        String offsetStr = JsonUtils.extractStringArgument(params, "offset"); //$NON-NLS-1$
+        String containsFilter = JsonUtils.extractStringArgument(params, "contains"); //$NON-NLS-1$
+        String extendedDocStr = JsonUtils.extractStringArgument(params, "extendedDocumentation"); //$NON-NLS-1$
         
         if (projectName == null || projectName.isEmpty())
         {
@@ -118,12 +121,12 @@ public class GetContentAssistTool implements IMcpTool
             return ToolResult.error("Line and column must be >= 1").toJson(); //$NON-NLS-1$
         }
         
-        int limit = DEFAULT_LIMIT;
+        int limit = Activator.getDefault().getDefaultLimit();
         if (limitStr != null && !limitStr.isEmpty())
         {
             try
             {
-                limit = Math.min(Integer.parseInt(limitStr), 200);
+                limit = Math.min((int) Double.parseDouble(limitStr), Activator.getDefault().getMaxLimit());
             }
             catch (NumberFormatException e)
             {
@@ -131,7 +134,22 @@ public class GetContentAssistTool implements IMcpTool
             }
         }
         
-        return getContentAssist(projectName, filePath, line, column, limit);
+        int offset = 0;
+        if (offsetStr != null && !offsetStr.isEmpty())
+        {
+            try
+            {
+                offset = Math.max(0, (int) Double.parseDouble(offsetStr));
+            }
+            catch (NumberFormatException e)
+            {
+                // Use default 0
+            }
+        }
+        
+        boolean extendedDocumentation = "true".equalsIgnoreCase(extendedDocStr); //$NON-NLS-1$
+        
+        return getContentAssist(projectName, filePath, line, column, limit, offset, containsFilter, extendedDocumentation);
     }
     
     /**
@@ -143,9 +161,13 @@ public class GetContentAssistTool implements IMcpTool
      * @param line line number (1-based)
      * @param column column number (1-based)
      * @param limit maximum proposals to return
+     * @param offset number of proposals to skip (for pagination)
+     * @param containsFilter comma-separated substrings to filter proposals
+     * @param extendedDocumentation whether to include full documentation
      * @return JSON result
      */
-    private String getContentAssist(String projectName, String filePath, int line, int column, int limit)
+    private String getContentAssist(String projectName, String filePath, int line, int column, 
+                                    int limit, int offset, String containsFilter, boolean extendedDocumentation)
     {
         // Find the project
         IWorkspace workspace = ResourcesPlugin.getWorkspace();
@@ -174,6 +196,9 @@ public class GetContentAssistTool implements IMcpTool
         final int targetLine = line;
         final int targetColumn = column;
         final int maxProposals = limit;
+        final int proposalOffset = offset;
+        final String filter = containsFilter;
+        final boolean extendedDoc = extendedDocumentation;
         
         AtomicReference<String> resultRef = new AtomicReference<>();
         
@@ -182,7 +207,8 @@ public class GetContentAssistTool implements IMcpTool
         display.syncExec(() -> {
             try
             {
-                String result = executeOnUiThread(targetFile, targetLine, targetColumn, maxProposals);
+                String result = executeOnUiThread(targetFile, targetLine, targetColumn, maxProposals, 
+                                                   proposalOffset, filter, extendedDoc);
                 resultRef.set(result);
             }
             catch (Exception e)
@@ -198,7 +224,8 @@ public class GetContentAssistTool implements IMcpTool
     /**
      * Executes content assist on UI thread.
      */
-    private String executeOnUiThread(IFile file, int line, int column, int maxProposals) throws Exception
+    private String executeOnUiThread(IFile file, int line, int column, int maxProposals, 
+                                     int proposalOffset, String containsFilter, boolean extendedDocumentation) throws Exception
     {
         IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
         if (window == null)
@@ -297,13 +324,26 @@ public class GetContentAssistTool implements IMcpTool
         ICompletionProposal[] proposals = processor.computeCompletionProposals(sourceViewer, offset);
         
         // Format results
-        return formatProposals(proposals, maxProposals, line, column, file.getFullPath().toString());
+        return formatProposals(proposals, maxProposals, proposalOffset, containsFilter, extendedDocumentation,
+                               line, column, file.getFullPath().toString());
     }
     
     /**
      * Formats completion proposals as JSON.
+     * 
+     * @param proposals all proposals from content assist
+     * @param maxProposals maximum proposals to return
+     * @param proposalOffset number of proposals to skip
+     * @param containsFilter comma-separated substrings to filter by (case-insensitive)
+     * @param extendedDocumentation whether to include full documentation
+     * @param line original line number
+     * @param column original column number
+     * @param filePath file path for result
+     * @return JSON string
      */
-    private String formatProposals(ICompletionProposal[] proposals, int maxProposals, int line, int column, String filePath)
+    private String formatProposals(ICompletionProposal[] proposals, int maxProposals, int proposalOffset,
+                                   String containsFilter, boolean extendedDocumentation,
+                                   int line, int column, String filePath)
     {
         JsonObject result = new JsonObject();
         result.addProperty("success", true); //$NON-NLS-1$
@@ -311,46 +351,93 @@ public class GetContentAssistTool implements IMcpTool
         result.addProperty("line", line); //$NON-NLS-1$
         result.addProperty("column", column); //$NON-NLS-1$
         
+        // Parse contains filter into lowercase parts
+        String[] filterParts = null;
+        if (containsFilter != null && !containsFilter.isEmpty())
+        {
+            filterParts = containsFilter.toLowerCase().split(","); //$NON-NLS-1$
+            for (int i = 0; i < filterParts.length; i++)
+            {
+                filterParts[i] = filterParts[i].trim();
+            }
+        }
+        
         JsonArray proposalsArray = new JsonArray();
         int count = 0;
+        int skipped = 0;
+        int filteredOut = 0;
         
         if (proposals != null)
         {
             for (ICompletionProposal proposal : proposals)
             {
+                String displayString = proposal.getDisplayString();
+                
+                // Apply contains filter
+                if (filterParts != null)
+                {
+                    boolean matches = false;
+                    String displayLower = displayString.toLowerCase();
+                    for (String part : filterParts)
+                    {
+                        if (!part.isEmpty() && displayLower.contains(part))
+                        {
+                            matches = true;
+                            break;
+                        }
+                    }
+                    if (!matches)
+                    {
+                        filteredOut++;
+                        continue;
+                    }
+                }
+                
+                // Apply offset (skip first N matching proposals)
+                if (skipped < proposalOffset)
+                {
+                    skipped++;
+                    continue;
+                }
+                
+                // Check limit
                 if (count >= maxProposals)
                 {
                     break;
                 }
                 
                 JsonObject proposalObj = new JsonObject();
-                proposalObj.addProperty("displayString", proposal.getDisplayString()); //$NON-NLS-1$
+                proposalObj.addProperty("displayString", displayString); //$NON-NLS-1$
                 
-                // Get additional info (documentation)
-                // Use ICompletionProposalExtension5 for async-capable proposals
-                String additionalInfo = null;
-                if (proposal instanceof ICompletionProposalExtension5)
+                // Only get documentation if extendedDocumentation is true
+                if (extendedDocumentation)
                 {
-                    // Get documentation using progress monitor
-                    Object info = ((ICompletionProposalExtension5) proposal)
-                        .getAdditionalProposalInfo(new NullProgressMonitor());
-                    if (info != null)
+                    // Get additional info (documentation)
+                    // Use ICompletionProposalExtension5 for async-capable proposals
+                    String additionalInfo = null;
+                    if (proposal instanceof ICompletionProposalExtension5)
                     {
-                        additionalInfo = info.toString();
+                        // Get documentation using progress monitor
+                        Object info = ((ICompletionProposalExtension5) proposal)
+                            .getAdditionalProposalInfo(new NullProgressMonitor());
+                        if (info != null)
+                        {
+                            additionalInfo = info.toString();
+                        }
                     }
-                }
-                else
-                {
-                    additionalInfo = proposal.getAdditionalProposalInfo();
-                }
-                
-                if (additionalInfo != null && !additionalInfo.isEmpty())
-                {
-                    // Strip HTML tags and CSS styles for cleaner output
-                    String cleanInfo = cleanHtmlContent(additionalInfo);
-                    if (!cleanInfo.isEmpty())
+                    else
                     {
-                        proposalObj.addProperty("documentation", cleanInfo); //$NON-NLS-1$
+                        additionalInfo = proposal.getAdditionalProposalInfo();
+                    }
+                    
+                    if (additionalInfo != null && !additionalInfo.isEmpty())
+                    {
+                        // Strip HTML tags and CSS styles for cleaner output
+                        String cleanInfo = cleanHtmlContent(additionalInfo);
+                        if (!cleanInfo.isEmpty())
+                        {
+                            proposalObj.addProperty("documentation", cleanInfo); //$NON-NLS-1$
+                        }
                     }
                 }
                 
@@ -359,7 +446,10 @@ public class GetContentAssistTool implements IMcpTool
             }
         }
         
-        result.addProperty("totalProposals", proposals != null ? proposals.length : 0); //$NON-NLS-1$
+        int totalProposals = proposals != null ? proposals.length : 0;
+        result.addProperty("totalProposals", totalProposals); //$NON-NLS-1$
+        result.addProperty("filteredOut", filteredOut); //$NON-NLS-1$
+        result.addProperty("skipped", skipped); //$NON-NLS-1$
         result.addProperty("returnedProposals", count); //$NON-NLS-1$
         result.add("proposals", proposalsArray); //$NON-NLS-1$
         

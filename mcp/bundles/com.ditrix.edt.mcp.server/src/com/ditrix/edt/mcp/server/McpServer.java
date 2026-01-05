@@ -21,6 +21,9 @@ import com.ditrix.edt.mcp.server.tools.impl.GetCheckDescriptionTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetConfigurationPropertiesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetContentAssistTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetEdtVersionTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetMetadataDetailsTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetMetadataObjectsTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetPlatformDocumentationTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProblemSummaryTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProjectErrorsTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetTasksTool;
@@ -102,6 +105,9 @@ public class McpServer
         registry.register(new GetTasksTool());
         registry.register(new GetCheckDescriptionTool());
         registry.register(new GetContentAssistTool());
+        registry.register(new GetPlatformDocumentationTool());
+        registry.register(new GetMetadataObjectsTool());
+        registry.register(new GetMetadataDetailsTool());
         
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -211,6 +217,22 @@ public class McpServer
                 return;
             }
             
+            // Add CORS headers for valid origins
+            if (origin != null)
+            {
+                exchange.getResponseHeaders().add("Access-Control-Allow-Origin", origin); //$NON-NLS-1$
+                exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"); //$NON-NLS-1$ //$NON-NLS-2$
+                exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Accept"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            
+            // Handle CORS preflight request
+            if ("OPTIONS".equals(method)) //$NON-NLS-1$
+            {
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+                return;
+            }
+            
             if ("POST".equals(method)) //$NON-NLS-1$
             {
                 handleMcpRequest(exchange);
@@ -235,12 +257,13 @@ public class McpServer
          */
         private boolean isValidOrigin(String origin)
         {
-            // Allow localhost origins and file:// origins
+            // Allow localhost origins, file:// origins, and "null" (for local file HTML)
             return origin.startsWith("http://localhost") || //$NON-NLS-1$
                    origin.startsWith("http://127.0.0.1") || //$NON-NLS-1$
                    origin.startsWith("https://localhost") || //$NON-NLS-1$
                    origin.startsWith("https://127.0.0.1") || //$NON-NLS-1$
                    origin.startsWith("file://") || //$NON-NLS-1$
+                   origin.equals("null") || //$NON-NLS-1$ // Local HTML files send "null" as origin
                    origin.startsWith("vscode-webview://"); //$NON-NLS-1$
         }
 
@@ -390,6 +413,22 @@ public class McpServer
         @Override
         public void handle(HttpExchange exchange) throws IOException
         {
+            // Add CORS headers for health check
+            String origin = exchange.getRequestHeaders().getFirst("Origin"); //$NON-NLS-1$
+            if (origin != null)
+            {
+                exchange.getResponseHeaders().add("Access-Control-Allow-Origin", origin); //$NON-NLS-1$
+            }
+            
+            // Handle OPTIONS preflight
+            if ("OPTIONS".equals(exchange.getRequestMethod())) //$NON-NLS-1$
+            {
+                exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, OPTIONS"); //$NON-NLS-1$ //$NON-NLS-2$
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+                return;
+            }
+            
             String response = "{\"status\": \"ok\", \"edt_version\": \"" + GetEdtVersionTool.getEdtVersion() + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
             exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
             sendResponse(exchange, 200, response);

@@ -19,6 +19,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 
 /**
  * Tool to get tasks (TODO, FIXME, etc.) from the workspace.
@@ -176,13 +177,13 @@ public class GetTasksTool implements IMcpTool
                 for (TaskInfo task : tasks)
                 {
                     md.append("| "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(task.type));
+                    md.append(MarkdownUtils.escapeForTable(task.type));
                     md.append(" | "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(task.priority));
+                    md.append(MarkdownUtils.escapeForTable(task.priority));
                     md.append(" | "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(task.message));
+                    md.append(MarkdownUtils.escapeForTable(task.message));
                     md.append(" | "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(task.path));
+                    md.append(MarkdownUtils.escapeForTable(task.path));
                     md.append(" | "); //$NON-NLS-1$
                     md.append(task.line);
                     md.append(" |\n"); //$NON-NLS-1$
@@ -196,18 +197,6 @@ public class GetTasksTool implements IMcpTool
         }
         
         return md.toString();
-    }
-    
-    /**
-     * Escapes special Markdown characters in text.
-     */
-    private static String escapeMarkdown(String text)
-    {
-        if (text == null)
-        {
-            return ""; //$NON-NLS-1$
-        }
-        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
     
     /**

@@ -19,6 +19,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 
 /**
  * Tool to get bookmarks from the workspace.
@@ -184,11 +185,11 @@ public class GetBookmarksTool implements IMcpTool
                 for (BookmarkInfo bookmark : bookmarks)
                 {
                     md.append("| "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(bookmark.project));
+                    md.append(MarkdownUtils.escapeForTable(bookmark.project));
                     md.append(" | "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(bookmark.message));
+                    md.append(MarkdownUtils.escapeForTable(bookmark.message));
                     md.append(" | "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(bookmark.path));
+                    md.append(MarkdownUtils.escapeForTable(bookmark.path));
                     md.append(" | "); //$NON-NLS-1$
                     md.append(bookmark.line);
                     md.append(" |\n"); //$NON-NLS-1$
@@ -202,18 +203,6 @@ public class GetBookmarksTool implements IMcpTool
         }
         
         return md.toString();
-    }
-    
-    /**
-     * Escapes special Markdown characters in text.
-     */
-    private static String escapeMarkdown(String text)
-    {
-        if (text == null)
-        {
-            return ""; //$NON-NLS-1$
-        }
-        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
     
     /**

@@ -12,6 +12,7 @@ import org.eclipse.core.resources.ResourcesPlugin;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.ProjectStateResult;
 
@@ -76,7 +77,7 @@ public class ListProjectsTool implements IMcpTool
                 for (IProject project : projects)
                 {
                     md.append("| "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(project.getName()));
+                    md.append(MarkdownUtils.escapeForTable(project.getName()));
                     md.append(" | "); //$NON-NLS-1$
                     
                     // Project state
@@ -84,7 +85,7 @@ public class ListProjectsTool implements IMcpTool
                     md.append(stateResult.getStateValue());
                     md.append(" | "); //$NON-NLS-1$
                     
-                    md.append(escapeMarkdown(project.getLocation() != null ? 
+                    md.append(MarkdownUtils.escapeForTable(project.getLocation() != null ? 
                         project.getLocation().toOSString() : "")); //$NON-NLS-1$
                     md.append(" | "); //$NON-NLS-1$
                     md.append(project.isOpen() ? "Yes" : "No"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -133,7 +134,7 @@ public class ListProjectsTool implements IMcpTool
                     
                     md.append(edtStatus);
                     md.append(" | "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(naturesStr));
+                    md.append(MarkdownUtils.escapeForTable(naturesStr));
                     md.append(" |\n"); //$NON-NLS-1$
                 }
             }
@@ -145,17 +146,5 @@ public class ListProjectsTool implements IMcpTool
         }
         
         return md.toString();
-    }
-    
-    /**
-     * Escapes special Markdown characters in text.
-     */
-    private static String escapeMarkdown(String text)
-    {
-        if (text == null)
-        {
-            return ""; //$NON-NLS-1$
-        }
-        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
 }

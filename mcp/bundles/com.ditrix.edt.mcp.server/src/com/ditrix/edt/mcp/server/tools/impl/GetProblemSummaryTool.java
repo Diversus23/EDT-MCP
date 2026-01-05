@@ -19,6 +19,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 
 /**
  * Tool to get problem summary (counts by project and severity).
@@ -174,7 +175,7 @@ public class GetProblemSummaryTool implements IMcpTool
                     int projectTotal = counts.values().stream().mapToInt(Integer::intValue).sum();
                     
                     md.append("| "); //$NON-NLS-1$
-                    md.append(escapeMarkdown(entry.getKey()));
+                    md.append(MarkdownUtils.escapeForTable(entry.getKey()));
                     md.append(" | "); //$NON-NLS-1$
                     md.append(counts.getOrDefault(MarkerSeverity.ERRORS, 0));
                     md.append(" | "); //$NON-NLS-1$
@@ -204,17 +205,5 @@ public class GetProblemSummaryTool implements IMcpTool
         }
         
         return md.toString();
-    }
-    
-    /**
-     * Escapes special Markdown characters in text.
-     */
-    private static String escapeMarkdown(String text)
-    {
-        if (text == null)
-        {
-            return ""; //$NON-NLS-1$
-        }
-        return text.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
 }
