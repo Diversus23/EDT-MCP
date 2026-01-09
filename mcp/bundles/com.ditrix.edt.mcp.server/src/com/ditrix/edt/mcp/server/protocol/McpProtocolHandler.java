@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.InitializeResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.JsonRpcRequest;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.JsonRpcResponse;
@@ -136,12 +137,21 @@ public class McpProtocolHandler
         // Execute tool
         String result = tool.execute(params);
         
+        // Check if plain text mode is enabled (Cursor compatibility)
+        boolean plainTextMode = Activator.getDefault().getPreferenceStore()
+            .getBoolean(PreferenceConstants.PREF_PLAIN_TEXT_MODE);
+        
         // Return response based on tool's declared response type
         switch (tool.getResponseType())
         {
             case JSON:
                 return buildToolCallJsonResponse(result, requestId);
             case MARKDOWN:
+                // In plain text mode, return markdown as plain text instead of embedded resource
+                if (plainTextMode)
+                {
+                    return buildToolCallTextResponse(result, requestId);
+                }
                 String fileName = tool.getResultFileName(params);
                 return buildToolCallResourceResponse(result, "text/markdown", fileName, requestId); //$NON-NLS-1$
             case TEXT:

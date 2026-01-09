@@ -103,6 +103,16 @@ public class McpServerPreferencePage extends FieldEditorPreferencePage implement
         maxLimitEditor.getTextControl(parent).setToolTipText(
             "Maximum number of results that can be requested. Prevents returning too much data.");
         addField(maxLimitEditor);
+        
+        // Plain text mode (Cursor compatibility)
+        BooleanFieldEditor plainTextModeEditor = new BooleanFieldEditor(
+            PreferenceConstants.PREF_PLAIN_TEXT_MODE,
+            "Plain text mode (Cursor compatibility)",
+            parent);
+        plainTextModeEditor.getDescriptionControl(parent).setToolTipText(
+            "When enabled, returns results as plain text instead of embedded resources. " +
+            "Enable this if your AI client (e.g., Cursor) doesn't support MCP resources.");
+        addField(plainTextModeEditor);
 
         // Server control group
         createServerControlGroup(parent);

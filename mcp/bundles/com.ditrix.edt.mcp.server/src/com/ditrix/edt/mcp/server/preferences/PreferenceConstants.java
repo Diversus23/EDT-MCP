@@ -23,6 +23,9 @@ public final class PreferenceConstants
     /** Maximum result limit for tools */
     public static final String PREF_MAX_LIMIT = "mcpMaxLimit"; //$NON-NLS-1$
     
+    /** Plain text mode (Cursor compatibility) - returns text instead of embedded resources */
+    public static final String PREF_PLAIN_TEXT_MODE = "mcpPlainTextMode"; //$NON-NLS-1$
+    
     /** Default port */
     public static final int DEFAULT_PORT = 8765;
     
@@ -37,6 +40,9 @@ public final class PreferenceConstants
     
     /** Default maximum limit */
     public static final int DEFAULT_MAX_LIMIT = 1000;
+    
+    /** Default plain text mode (disabled - use embedded resources by default) */
+    public static final boolean DEFAULT_PLAIN_TEXT_MODE = false;
     
     private PreferenceConstants()
     {

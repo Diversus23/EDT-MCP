@@ -22,5 +22,6 @@ public class PreferenceInitializer extends AbstractPreferenceInitializer
         store.setDefault(PreferenceConstants.PREF_CHECKS_FOLDER, PreferenceConstants.DEFAULT_CHECKS_FOLDER);
         store.setDefault(PreferenceConstants.PREF_DEFAULT_LIMIT, PreferenceConstants.DEFAULT_DEFAULT_LIMIT);
         store.setDefault(PreferenceConstants.PREF_MAX_LIMIT, PreferenceConstants.DEFAULT_MAX_LIMIT);
+        store.setDefault(PreferenceConstants.PREF_PLAIN_TEXT_MODE, PreferenceConstants.DEFAULT_PLAIN_TEXT_MODE);
     }
 }

@@ -28,6 +28,7 @@ Go to **Window → Preferences → MCP Server**:
 - **Server Port**: HTTP port (default: 8765)
 - **Check descriptions folder**: Path to check description markdown files
 - **Auto-start**: Start server on EDT launch
+- **Plain text mode (Cursor compatibility)**: Returns results as plain text instead of embedded resources (for AI clients that don't support MCP resources)
 
 ## Connecting AI Assistants
 
@@ -46,6 +47,8 @@ Create `.vscode/mcp.json`:
 ```
 
 ### Cursor IDE
+
+> **Note:** Cursor doesn't support MCP embedded resources. Enable **"Plain text mode (Cursor compatibility)"** in EDT preferences: **Window → Preferences → MCP Server**.
 
 Create `.cursor/mcp.json`:
 ```json
@@ -252,6 +255,12 @@ Click the status indicator in EDT status bar:
 
 ## Version History
 
+### 1.15.0
+- **New**: "Plain text mode (Cursor compatibility)" preference setting
+  - When enabled, returns Markdown results as plain text instead of embedded resources
+  - Solves compatibility issues with AI clients that don't support MCP embedded resources (e.g., Cursor)
+  - Located in: **Window → Preferences → MCP Server**
+
 ### 1.9.0
 - **Improved**: Enhanced EObject formatting in metadata tools using new `EObjectInspector` utility
   - Smart detection of simple value holders (enums, wrappers) vs complex objects needing expansion
@@ -373,4 +382,4 @@ Click the status indicator in EDT status bar:
 Copyright (c) 2025 DitriX. All rights reserved.
 
 ---
-*EDT MCP Server v1.9.0*
+*EDT MCP Server v1.15.0*
