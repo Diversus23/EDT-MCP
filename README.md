@@ -85,7 +85,7 @@ Add to `claude_desktop_config.json`:
 | `get_edt_version` | Returns current EDT version |
 | `list_projects` | Lists workspace projects with properties |
 | `get_configuration_properties` | Gets 1C configuration properties |
-| `get_project_errors` | Returns EDT problems with severity/checkId filters |
+| `get_project_errors` | Returns EDT problems with severity/checkId/objects filters |
 | `get_problem_summary` | Problem counts grouped by project and severity |
 | `clean_project` | Cleans project markers and triggers full revalidation |
 | `revalidate_objects` | Revalidates specific objects by FQN (e.g. "Document.MyDoc") |
@@ -96,6 +96,7 @@ Add to `claude_desktop_config.json`:
 | `get_platform_documentation` | Get platform type documentation (methods, properties, constructors) |
 | `get_metadata_objects` | Get list of metadata objects from 1C configuration |
 | `get_metadata_details` | Get detailed properties of metadata objects (attributes, tabular sections, etc.) |
+| `find_references` | Find all references to a metadata object (in metadata, BSL code, forms, roles, etc.) |
 
 ### Content Assist Tool
 
@@ -160,21 +161,62 @@ Returns only methods containing "Insert" or "Add" with full documentation:
   - `Document.MyDocument`, `Catalog.MyCatalog`, `CommonModule.MyModule`
   - `Document.MyDoc.Form.MyForm` for nested objects
 
-### Platform Documentation Tool
+### Project Errors Tool
 
-**`get_platform_documentation`** - Get documentation for platform types (ValueTable, Array, Structure, Query, etc.)
+**`get_project_errors`** - Get detailed configuration problems from EDT with multiple filter options.
 
 **Parameters:**
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `typeName` | Yes | Platform type name (e.g. `ValueTable`, `Array`, `Structure`) |
-| `projectName` | No | EDT project name (uses first available project if not specified) |
-| `memberName` | No | Filter by member name (partial match) |
-| `memberType` | No | Filter: `method`, `property`, `constructor`, `event`, `all` (default: `all`) |
-| `language` | No | Output language: `en` or `ru` (default: `en`) |
-| `limit` | No | Maximum results (default: 50) |
+| `projectName` | No | Filter by project name |
+| `severity` | No | Filter by severity: `ERRORS`, `BLOCKER`, `CRITICAL`, `MAJOR`, `MINOR`, `TRIVIAL` |
+| `checkId` | No | Filter by check ID substring (e.g. `ql-temp-table-index`) |
+| `objects` | No | Filter by object FQNs (array). Returns errors only from specified objects |
+| `limit` | No | Maximum results (default: 100, max: 1000) |
 
-**Example:**
+**Objects filter format:**
+- Array of FQN strings: `["Document.SalesOrder", "Catalog.Products"]`
+- Case-insensitive partial matching
+- Matches against error location (objectPresentation)
+- FQN examples:
+  - `Document.SalesOrder` - all errors in document
+  - `Catalog.Products` - all errors in catalog
+  - `CommonModule.MyModule` - all errors in common module
+  - `Document.SalesOrder.Form.ItemForm` - errors in specific form
+
+**Example - Get errors for specific objects:**
+```json
+{
+  "projectName": "MyProject",
+  "objects": ["Document.SalesOrder", "Catalog.Products"],
+  "severity": "BLOCKER"
+}
+```
+
+**Example - Get all errors with check ID filter:**
+```json
+{
+  "projectName": "MyProject",
+  "checkId": "ql-temp-table"
+}
+```
+
+### Platform Documentation Tool
+
+**`get_platform_documentation`** - Get documentation for platform types (ValueTable, Array, Structure, Query, etc.) and built-in functions (FindFiles, Message, Format, etc.)
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `typeName` | Yes | Type or function name (e.g. `ValueTable`, `Array`, `FindFiles`, `Message`) |
+| `category` | No | Category: `type` (platform types), `builtin` (built-in functions). Default: `type` |
+| `projectName` | No | EDT project name (uses first available project if not specified) |
+| `memberName` | No | Filter by member name (partial match) - only for `type` category |
+| `memberType` | No | Filter: `method`, `property`, `constructor`, `event`, `all` (default: `all`) - only for `type` category |
+| `language` | No | Output language: `en` or `ru` (default: `en`) |
+| `limit` | No | Maximum results (default: 50) - only for `type` category |
+
+**Example - Platform type documentation:**
 ```json
 {
   "typeName": "ValueTable",
@@ -183,6 +225,17 @@ Returns only methods containing "Insert" or "Add" with full documentation:
   "language": "ru"
 }
 ```
+
+**Example - Built-in function documentation:**
+```json
+{
+  "typeName": "FindFiles",
+  "category": "builtin",
+  "language": "en"
+}
+```
+
+Returns function signature with parameters, types, and return value.
 
 ### Metadata Objects Tool
 
@@ -231,6 +284,58 @@ Returns markdown table with columns: Name, Synonym, Comment, Type, ObjectModule,
 
 Returns markdown with detailed object properties, attributes, tabular sections, forms, commands.
 
+### Find References Tool
+
+**`find_references`** - Find all references to a metadata object. Returns all places where the object is used: in other metadata objects, BSL code, forms, roles, subsystems, etc. Matches EDT's built-in "Find References" functionality.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `projectName` | Yes | EDT project name |
+| `objectFqn` | Yes | Fully qualified name (e.g. `Catalog.Products`, `Document.SalesOrder`, `CommonModule.Common`) |
+| `limit` | No | Maximum results per category (default: 100, max: 500) |
+
+**Example:**
+```json
+{
+  "projectName": "MyProject",
+  "objectFqn": "Catalog.Products"
+}
+```
+
+**Returns markdown with references in EDT-compatible format:**
+
+```markdown
+# References to Catalog.Items
+
+**Total references found:** 122
+
+- Catalog.ItemKeys - Attributes.Item.Type - Type: types
+- Catalog.ItemKeys.Form.ChoiceForm.Form - Items.List.Item.Data path - Type: types
+- Catalog.Items - Attributes.PackageUnit.Choice parameter links - Ref
+- Catalog.Items.Form.ItemForm.Form - Items.GroupTop.GroupMainAttributes.Code.Data path - Type: types
+- CommonAttribute.Author - Content - metadata
+- Configuration - Catalogs - catalogs
+- DefinedType.typeItem - Type - Type: types
+- EventSubscription.BeforeWrite_CatalogsLockDataModification - Source - Type: types
+- Role.FullAccess.Rights - Role rights - object
+- Subsystem.Settings.Subsystem.Items - Content - content
+
+### BSL Modules
+
+- CommonModules/GetItemInfo/Module.bsl [Line 199; Line 369; Line 520]
+- Catalogs/Items/Forms/ListForm/Module.bsl [Line 18; Line 19]
+```
+
+**Reference types included:**
+- **Metadata references** - Attributes, form items, command parameters, type descriptions
+- **Type usages** - DefinedTypes, ChartOfCharacteristicTypes, type compositions
+- **Common attributes** - Objects included in common attribute content
+- **Event subscriptions** - Source objects for subscriptions
+- **Roles** - Objects with role permissions
+- **Subsystems** - Subsystem content
+- **BSL code** - References in BSL modules with line numbers
+
 ### Output Formats
 
 - **Markdown tools**: `list_projects`, `get_project_errors`, `get_bookmarks`, `get_tasks`, `get_problem_summary`, `get_check_description` - return Markdown as EmbeddedResource with `mimeType: text/markdown`
@@ -259,11 +364,25 @@ Click the status indicator in EDT status bar:
 
 ## Version History
 
-### 1.15.0
+### 1.17.0
+- **New**: `find_references` tool - Find all references to a metadata object
+  - Returns all places where the object is used: roles, subsystems, forms, type descriptions, etc.
+  - Results grouped by category (Subsystems, Roles, Forms, Type descriptions, etc.)
+  - Searches through produced types, predefined items, fields
+  - Note: BSL code references will be added in future version
+### 1.16.0  
 - **New**: "Plain text mode (Cursor compatibility)" preference setting
   - When enabled, returns Markdown results as plain text instead of embedded resources
   - Solves compatibility issues with AI clients that don't support MCP embedded resources (e.g., Cursor)
   - Located in: **Window → Preferences → MCP Server**
+- **New**: `objects` filter parameter for `get_project_errors` tool
+  - Filter errors by specific object FQNs (e.g. `["Document.SalesOrder", "Catalog.Products"]`)
+  - Returns only errors from the specified objects
+  - FQN matching is case-insensitive and supports partial matches
+- **New**: Built-in function documentation in `get_platform_documentation` tool
+  - Use `category: "builtin"` to get documentation for global functions (FindFiles, Message, Format, etc.)
+  - Returns function signature with parameters, types, optional flags, and return type
+  - Supports both English and Russian function names
 
 ### 1.9.0
 - **Improved**: Enhanced EObject formatting in metadata tools using new `EObjectInspector` utility
@@ -386,4 +505,4 @@ Click the status indicator in EDT status bar:
 Copyright (c) 2025 DitriX. All rights reserved.
 
 ---
-*EDT MCP Server v1.15.0*
+*EDT MCP Server v1.16.0*
