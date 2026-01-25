@@ -13,7 +13,9 @@ MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (C
 - 🔄 **Project Revalidation** - Trigger revalidation when validation gets stuck
 - 🔖 **Bookmarks & Tasks** - Access bookmarks and TODO/FIXME markers
 - 💡 **Content Assist** - Get type info, method hints and platform documentation at any code position
-- 🎯 **Status Bar** - Real-time server status indicator with request counter
+- 🚀 **Application Management** - Get applications, update database, launch in debug mode
+- 🎯 **Status Bar** - Real-time server status with tool name, execution time, and interactive controls
+- ⚡ **Interruptible Operations** - Cancel long-running operations and send signals to AI agent
 
 ## Installation
 
@@ -33,6 +35,58 @@ Go to **Window → Preferences → MCP Server**:
 - **Check descriptions folder**: Path to check description markdown files
 - **Auto-start**: Start server on EDT launch
 - **Plain text mode (Cursor compatibility)**: Returns results as plain text instead of embedded resources (for AI clients that don't support MCP resources)
+
+![MCP Server Settings](img/Settings.png)
+
+## Status Bar Controls
+
+The MCP server status bar shows real-time execution status with interactive controls.
+
+**Status Indicator:**
+- 🟢 **Green** - Server running, idle
+- 🟡 **Yellow blinking** - Tool is executing
+- ⚪ **Grey** - Server stopped
+
+**During Tool Execution:**
+- Shows tool name (e.g., `MCP: update_database`)
+- Shows elapsed time in MM:SS format
+- Click to access control menu
+
+![Status Bar Menu](img/StatusButtons.png)
+
+### User Signal Controls
+
+When a tool is executing, you can send signals to the AI agent to interrupt the MCP call:
+
+| Button | Description | When to Use |
+|--------|-------------|-------------|
+| **Cancel Operation** | Stops the MCP call and notifies agent | When you want to cancel a long-running operation |
+| **Retry** | Tells agent to retry the operation | When an EDT error occurred and you want to try again |
+| **Continue in Background** | Notifies agent the operation is long-running | When you want agent to check status periodically |
+| **Ask Expert** | Stops and asks agent to consult with you | When you need to provide guidance |
+| **Send Custom Message...** | Send a custom message to agent | For any custom instruction |
+
+**How it works:**
+1. When you click a button, a dialog appears showing the message that will be sent to the agent
+2. You can edit the message before sending
+3. The MCP call is immediately interrupted and returns control to the agent
+4. The EDT operation continues running in the background
+5. Agent receives a response like:
+```
+USER SIGNAL: Your message here
+
+Signal Type: CANCEL
+Tool: update_database
+Elapsed: 20s
+
+Note: The EDT operation may still be running in background.
+```
+
+**Use cases:**
+- Long-running operations (full database update, project validation) blocking the agent
+- Need to give the agent additional instructions
+- EDT showed an error dialog and you want agent to retry
+- Want to switch agent's focus to a different task
 
 ## Connecting AI Assistants
 
@@ -97,6 +151,9 @@ Add to `claude_desktop_config.json`:
 | `get_metadata_objects` | Get list of metadata objects from 1C configuration |
 | `get_metadata_details` | Get detailed properties of metadata objects (attributes, tabular sections, etc.) |
 | `find_references` | Find all references to a metadata object (in metadata, BSL code, forms, roles, etc.) |
+| `get_applications` | Get list of applications (infobases) for a project with update state |
+| `update_database` | Update database (infobase) with full or incremental update mode |
+| `debug_launch` | Launch application in debug mode (auto-updates database before launch) |
 
 ### Content Assist Tool
 
@@ -124,35 +181,6 @@ Add to `claude_desktop_config.json`:
    - Methods after dot (e.g. `Structure.Insert`, `Array.Add`)
    - Object properties and fields
    - Configuration objects and modules
-
-**Example - Get methods for Structure with filter:**
-```json
-{
-  "projectName": "MyProject",
-  "filePath": "CommonModules/MyCommonModule/Module.bsl",
-  "line": 15,
-  "column": 12,
-  "contains": "Insert,Add",
-  "extendedDocumentation": true
-}
-```
-
-Returns only methods containing "Insert" or "Add" with full documentation:
-```json
-{
-  "success": true,
-  "totalProposals": 8,
-  "filteredOut": 6,
-  "skipped": 0,
-  "returnedProposals": 2,
-  "proposals": [
-    {
-      "displayString": "Insert(Key) ~ Structure",
-      "documentation": "Procedure Structure.Insert(Key, [Value])..."
-    }
-  ]
-}
-```
 
 ### Validation Tools
 
@@ -184,23 +212,6 @@ Returns only methods containing "Insert" or "Add" with full documentation:
   - `CommonModule.MyModule` - all errors in common module
   - `Document.SalesOrder.Form.ItemForm` - errors in specific form
 
-**Example - Get errors for specific objects:**
-```json
-{
-  "projectName": "MyProject",
-  "objects": ["Document.SalesOrder", "Catalog.Products"],
-  "severity": "BLOCKER"
-}
-```
-
-**Example - Get all errors with check ID filter:**
-```json
-{
-  "projectName": "MyProject",
-  "checkId": "ql-temp-table"
-}
-```
-
 ### Platform Documentation Tool
 
 **`get_platform_documentation`** - Get documentation for platform types (ValueTable, Array, Structure, Query, etc.) and built-in functions (FindFiles, Message, Format, etc.)
@@ -216,27 +227,6 @@ Returns only methods containing "Insert" or "Add" with full documentation:
 | `language` | No | Output language: `en` or `ru` (default: `en`) |
 | `limit` | No | Maximum results (default: 50) - only for `type` category |
 
-**Example - Platform type documentation:**
-```json
-{
-  "typeName": "ValueTable",
-  "memberType": "method",
-  "memberName": "Add",
-  "language": "ru"
-}
-```
-
-**Example - Built-in function documentation:**
-```json
-{
-  "typeName": "FindFiles",
-  "category": "builtin",
-  "language": "en"
-}
-```
-
-Returns function signature with parameters, types, and return value.
-
 ### Metadata Objects Tool
 
 **`get_metadata_objects`** - Get list of metadata objects from 1C configuration.
@@ -250,17 +240,6 @@ Returns function signature with parameters, types, and return value.
 | `limit` | No | Maximum results (default: 100) |
 | `language` | No | Language code for synonyms (e.g. `en`, `ru`). Uses configuration default if not specified |
 
-**Example:**
-```json
-{
-  "projectName": "MyProject",
-  "metadataType": "documents",
-  "nameFilter": "Sales"
-}
-```
-
-Returns markdown table with columns: Name, Synonym, Comment, Type, ObjectModule, ManagerModule.
-
 ### Metadata Details Tool
 
 **`get_metadata_details`** - Get detailed properties of metadata objects.
@@ -273,17 +252,6 @@ Returns markdown table with columns: Name, Synonym, Comment, Type, ObjectModule,
 | `full` | No | Return all properties (`true`) or only key info (`false`). Default: `false` |
 | `language` | No | Language code for synonyms. Uses configuration default if not specified |
 
-**Example:**
-```json
-{
-  "projectName": "MyProject",
-  "objectFqns": ["Document.SalesOrder", "Catalog.Products"],
-  "full": true
-}
-```
-
-Returns markdown with detailed object properties, attributes, tabular sections, forms, commands.
-
 ### Find References Tool
 
 **`find_references`** - Find all references to a metadata object. Returns all places where the object is used: in other metadata objects, BSL code, forms, roles, subsystems, etc. Matches EDT's built-in "Find References" functionality.
@@ -294,14 +262,6 @@ Returns markdown with detailed object properties, attributes, tabular sections, 
 | `projectName` | Yes | EDT project name |
 | `objectFqn` | Yes | Fully qualified name (e.g. `Catalog.Products`, `Document.SalesOrder`, `CommonModule.Common`) |
 | `limit` | No | Maximum results per category (default: 100, max: 500) |
-
-**Example:**
-```json
-{
-  "projectName": "MyProject",
-  "objectFqn": "Catalog.Products"
-}
-```
 
 **Returns markdown with references in EDT-compatible format:**
 
@@ -336,6 +296,45 @@ Returns markdown with detailed object properties, attributes, tabular sections, 
 - **Subsystems** - Subsystem content
 - **BSL code** - References in BSL modules with line numbers
 
+### Application Management Tools
+
+#### Get Applications Tool
+
+**`get_applications`** - Get list of applications (infobases) for a project. Returns application ID, name, type, and current update state. Use this to get application IDs for `update_database` and `debug_launch` tools.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `projectName` | Yes | EDT project name |
+
+#### Update Database Tool
+
+**`update_database`** - Update database (infobase) configuration. Supports full and incremental update modes.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `projectName` | Yes | EDT project name |
+| `applicationId` | Yes | Application ID from `get_applications` |
+| `fullUpdate` | No | If true - full reload, if false - incremental update (default: false) |
+| `autoRestructure` | No | Automatically apply restructurization if needed (default: true) |
+
+#### Debug Launch Tool
+
+**`debug_launch`** - Launch application in debug mode. Automatically updates database before launching and finds existing launch configuration.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `projectName` | Yes | EDT project name |
+| `applicationId` | Yes | Application ID from `get_applications` |
+| `updateBeforeLaunch` | No | If true - update database before launching (default: true) |
+
+**Notes:**
+- Requires a launch configuration to be created in EDT first (Run → Run Configurations...)
+- If no configuration exists, returns list of available configurations
+- `updateBeforeLaunch=true` skips update if database is already up to date
+
 ### Output Formats
 
 - **Markdown tools**: `list_projects`, `get_project_errors`, `get_bookmarks`, `get_tasks`, `get_problem_summary`, `get_check_description` - return Markdown as EmbeddedResource with `mimeType: text/markdown`
@@ -363,6 +362,29 @@ Click the status indicator in EDT status bar:
 - Java 17+
 
 ## Version History
+
+### 1.18.0
+- **New**: `get_applications` tool - Get list of applications (infobases) for a project
+  - Returns application ID, name, type, and current update state
+  - Use this to get application IDs for `update_database` and `debug_launch` tools
+- **New**: `update_database` tool - Update database (infobase) configuration
+  - Supports full update (complete reload) and incremental update (changes only)
+  - Auto-applies restructurization when needed
+  - Returns detailed status before and after update
+- **New**: `debug_launch` tool - Launch application in debug mode
+  - Automatically updates database before launching (configurable via `updateBeforeLaunch` parameter)
+  - Finds existing launch configuration for project/application
+  - Starts debug session directly from AI assistant
+- **New**: Status bar enhancements
+  - Shows current tool name during execution (e.g., `MCP: update_database`)
+  - Shows elapsed time in MM:SS format
+  - Yellow blinking indicator during tool execution
+  - Wider status bar for full tool names display
+- **New**: Interruptible tool execution with user signals
+  - Cancel long-running operations and return control to AI agent immediately
+  - Send signals: Cancel, Retry, Continue in Background, Ask Expert, Custom Message
+  - Dialog preview shows exactly what will be sent to agent
+  - EDT operation continues in background while agent receives immediate response
 
 ### 1.17.0
 - **New**: `find_references` tool - Find all references to a metadata object

@@ -17,7 +17,9 @@ import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.tools.impl.GetBookmarksTool;
+import com.ditrix.edt.mcp.server.tools.impl.DebugLaunchTool;
 import com.ditrix.edt.mcp.server.tools.impl.FindReferencesTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetApplicationsTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetCheckDescriptionTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetConfigurationPropertiesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetContentAssistTool;
@@ -31,6 +33,7 @@ import com.ditrix.edt.mcp.server.tools.impl.GetTasksTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListProjectsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CleanProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.RevalidateObjectsTool;
+import com.ditrix.edt.mcp.server.tools.impl.UpdateDatabaseTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -47,6 +50,18 @@ public class McpServer
     
     /** Request counter - use AtomicLong for thread safety */
     private final AtomicLong requestCount = new AtomicLong(0);
+    
+    /** Current executing tool name */
+    private volatile String currentToolName = null;
+    
+    /** Timestamp when current tool execution started (milliseconds) */
+    private volatile long toolExecutionStartTime = 0;
+    
+    /** User signal for current operation (cancel, retry, background, expert) */
+    private volatile UserSignal userSignal = null;
+    
+    /** Currently active tool call that can be interrupted */
+    private volatile ActiveToolCall activeToolCall = null;
     
     /** Protocol handler */
     private McpProtocolHandler protocolHandler;
@@ -110,6 +125,11 @@ public class McpServer
         registry.register(new GetMetadataObjectsTool());
         registry.register(new GetMetadataDetailsTool());
         registry.register(new FindReferencesTool());
+        
+        // Application tools
+        registry.register(new GetApplicationsTool());
+        registry.register(new UpdateDatabaseTool());
+        registry.register(new DebugLaunchTool());
         
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -197,6 +217,140 @@ public class McpServer
     }
 
     /**
+     * Returns the currently executing tool name.
+     * 
+     * @return tool name or null if no tool is executing
+     */
+    public String getCurrentToolName()
+    {
+        return currentToolName;
+    }
+
+    /**
+     * Sets the currently executing tool name.
+     * Also records the start time when a tool begins execution.
+     * 
+     * @param toolName the tool name or null when execution completes
+     */
+    public void setCurrentToolName(String toolName)
+    {
+        this.currentToolName = toolName;
+        this.toolExecutionStartTime = toolName != null ? System.currentTimeMillis() : 0;
+    }
+
+    /**
+     * Checks if a tool is currently executing.
+     * 
+     * @return true if a tool is executing
+     */
+    public boolean isToolExecuting()
+    {
+        return currentToolName != null;
+    }
+
+    /**
+     * Returns the elapsed time in seconds since tool execution started.
+     * 
+     * @return elapsed seconds or 0 if no tool is executing
+     */
+    public long getToolExecutionSeconds()
+    {
+        if (toolExecutionStartTime == 0)
+        {
+            return 0;
+        }
+        return (System.currentTimeMillis() - toolExecutionStartTime) / 1000;
+    }
+
+    /**
+     * Sets a user signal for the current operation.
+     * This signal will be included in the tool response.
+     * 
+     * @param signal the user signal
+     */
+    public void setUserSignal(UserSignal signal)
+    {
+        this.userSignal = signal;
+    }
+
+    /**
+     * Gets and clears the current user signal.
+     * Returns null if no signal is pending.
+     * 
+     * @return the user signal or null
+     */
+    public UserSignal consumeUserSignal()
+    {
+        UserSignal signal = this.userSignal;
+        this.userSignal = null;
+        return signal;
+    }
+
+    /**
+     * Checks if a user signal is pending.
+     * 
+     * @return true if a signal is pending
+     */
+    public boolean hasUserSignal()
+    {
+        return userSignal != null;
+    }
+
+    /**
+     * Sets the active tool call.
+     * 
+     * @param toolCall the active tool call
+     */
+    public void setActiveToolCall(ActiveToolCall toolCall)
+    {
+        this.activeToolCall = toolCall;
+    }
+
+    /**
+     * Gets the active tool call.
+     * 
+     * @return the active tool call or null
+     */
+    public ActiveToolCall getActiveToolCall()
+    {
+        return activeToolCall;
+    }
+
+    /**
+     * Clears the active tool call.
+     */
+    public void clearActiveToolCall()
+    {
+        this.activeToolCall = null;
+    }
+
+    /**
+     * Interrupts the current tool call with a user signal.
+     * Sends the signal response immediately and returns control to the agent.
+     * This method is thread-safe.
+     * 
+     * @param signal the user signal
+     * @return true if the call was interrupted successfully
+     */
+    public synchronized boolean interruptToolCall(UserSignal signal)
+    {
+        ActiveToolCall call = this.activeToolCall;
+        if (call != null && !call.hasResponded())
+        {
+            boolean sent = call.sendSignalResponse(signal);
+            if (sent)
+            {
+                // Clear tool execution state atomically
+                this.currentToolName = null;
+                this.toolExecutionStartTime = 0;
+                this.activeToolCall = null;
+            }
+            return sent;
+        }
+        return false;
+    }
+
+    /**
      * MCP request handler.
      * Implements Streamable HTTP transport as per MCP 2025-11-25 specification.
      */
@@ -215,7 +369,8 @@ public class McpServer
             if (origin != null && !isValidOrigin(origin))
             {
                 Activator.logInfo("Invalid Origin header rejected: " + origin); //$NON-NLS-1$
-                sendResponse(exchange, 403, "{\"jsonrpc\": \"2.0\", \"error\": {\"code\": -32600, \"message\": \"Invalid Origin\"}}"); //$NON-NLS-1$
+                sendResponse(exchange, 403, com.ditrix.edt.mcp.server.protocol.JsonUtils.buildJsonRpcError(
+                    McpConstants.ERROR_INVALID_REQUEST, "Invalid Origin", null)); //$NON-NLS-1$
                 return;
             }
             
@@ -250,7 +405,7 @@ public class McpServer
             }
             else
             {
-                sendResponse(exchange, 405, "{\"error\": \"Method not allowed\"}"); //$NON-NLS-1$
+                sendResponse(exchange, 405, com.ditrix.edt.mcp.server.protocol.JsonUtils.buildSimpleError("Method not allowed")); //$NON-NLS-1$
             }
         }
         
@@ -293,10 +448,24 @@ public class McpServer
             
             String response;
             boolean isInitialize = requestBody.contains("\"" + McpConstants.METHOD_INITIALIZE + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            boolean isToolCall = requestBody.contains("\"" + McpConstants.METHOD_TOOLS_CALL + "\""); //$NON-NLS-1$ //$NON-NLS-2$
 
             try
             {
-                response = protocolHandler.processRequest(requestBody);
+                if (isToolCall)
+                {
+                    // Handle tool calls with interruptible execution
+                    response = handleInterruptibleToolCall(exchange, requestBody);
+                    if (response == null)
+                    {
+                        // Response was already sent (user interrupted)
+                        return;
+                    }
+                }
+                else
+                {
+                    response = protocolHandler.processRequest(requestBody);
+                }
                 
                 // null response means notification (no response needed)
                 if (response == null)
@@ -312,8 +481,8 @@ public class McpServer
             catch (Exception e)
             {
                 Activator.logError("MCP request processing error", e); //$NON-NLS-1$
-                response = "{\"jsonrpc\": \"2.0\", \"error\": {\"code\": -32603, \"message\": \"" //$NON-NLS-1$
-                    + e.getMessage() + "\"}, \"id\": null}"; //$NON-NLS-1$
+                response = com.ditrix.edt.mcp.server.protocol.JsonUtils.buildJsonRpcError(
+                    McpConstants.ERROR_INTERNAL, e.getMessage(), null);
             }
 
             // Check if client accepts SSE
@@ -335,6 +504,159 @@ public class McpServer
                 exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
                 sendResponse(exchange, 200, response);
             }
+        }
+        
+        /**
+         * Handles tool call with support for user interruption.
+         * Runs tool execution in a separate thread and monitors for user signals.
+         * 
+         * @param exchange the HTTP exchange
+         * @param requestBody the request body
+         * @return the response, or null if response was already sent (interrupted)
+         */
+        private String handleInterruptibleToolCall(HttpExchange exchange, String requestBody) throws Exception
+        {
+            // Extract request ID and tool name for ActiveToolCall
+            Object requestId = extractRequestId(requestBody);
+            String toolName = extractToolName(requestBody);
+            
+            // Create and register active tool call
+            ActiveToolCall activeCall = new ActiveToolCall(exchange, toolName, requestId);
+            setActiveToolCall(activeCall);
+            
+            // Use a container to hold the result from the background thread
+            final String[] resultContainer = new String[1];
+            final Exception[] errorContainer = new Exception[1];
+            final boolean[] completedFlag = new boolean[1];
+            
+            // Run tool execution in background thread
+            Thread executionThread = new Thread(() -> {
+                try
+                {
+                    resultContainer[0] = protocolHandler.processRequest(requestBody);
+                }
+                catch (Exception e)
+                {
+                    errorContainer[0] = e;
+                }
+                finally
+                {
+                    synchronized (completedFlag)
+                    {
+                        completedFlag[0] = true;
+                        completedFlag.notifyAll();
+                    }
+                }
+            }, "MCP-Tool-Executor"); //$NON-NLS-1$
+            
+            executionThread.start();
+            
+            // Wait for completion or user signal
+            synchronized (completedFlag)
+            {
+                while (!completedFlag[0])
+                {
+                    try
+                    {
+                        // Check every 100ms for signals
+                        completedFlag.wait(100);
+                        
+                        // Check if user sent an interrupt signal
+                        if (activeCall.hasResponded())
+                        {
+                            // User already sent a response, don't send another
+                            clearActiveToolCall();
+                            return null;
+                        }
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            
+            // Clear active tool call
+            clearActiveToolCall();
+            
+            // Check if response was already sent while we were waiting
+            if (activeCall.hasResponded())
+            {
+                return null;
+            }
+            
+            // Return result or throw error
+            if (errorContainer[0] != null)
+            {
+                throw errorContainer[0];
+            }
+            
+            return resultContainer[0];
+        }
+        
+        /**
+         * Extracts request ID from JSON-RPC request using Gson.
+         */
+        private Object extractRequestId(String requestBody)
+        {
+            try
+            {
+                com.google.gson.JsonElement element = com.google.gson.JsonParser.parseString(requestBody);
+                if (element.isJsonObject())
+                {
+                    com.google.gson.JsonObject jsonObject = element.getAsJsonObject();
+                    if (jsonObject.has("id")) //$NON-NLS-1$
+                    {
+                        com.google.gson.JsonElement idElement = jsonObject.get("id"); //$NON-NLS-1$
+                        if (idElement.isJsonPrimitive())
+                        {
+                            com.google.gson.JsonPrimitive primitive = idElement.getAsJsonPrimitive();
+                            if (primitive.isString())
+                            {
+                                return primitive.getAsString();
+                            }
+                            else if (primitive.isNumber())
+                            {
+                                return primitive.getAsLong();
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Activator.logError("Failed to extract request ID", e); //$NON-NLS-1$
+            }
+            return null;
+        }
+        
+        /**
+         * Extracts tool name from tools/call request using Gson.
+         */
+        private String extractToolName(String requestBody)
+        {
+            try
+            {
+                com.google.gson.JsonElement element = com.google.gson.JsonParser.parseString(requestBody);
+                if (element.isJsonObject())
+                {
+                    com.google.gson.JsonObject jsonObject = element.getAsJsonObject();
+                    if (jsonObject.has("params")) //$NON-NLS-1$
+                    {
+                        com.google.gson.JsonObject params = jsonObject.getAsJsonObject("params"); //$NON-NLS-1$
+                        if (params.has("name")) //$NON-NLS-1$
+                        {
+                            return params.get("name").getAsString(); //$NON-NLS-1$
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Activator.logError("Failed to extract tool name", e); //$NON-NLS-1$
+            }
+            return "unknown"; //$NON-NLS-1$
         }
         
         /**
@@ -390,13 +712,12 @@ public class McpServer
                 // Client wants SSE stream - we could support server-initiated messages here
                 // For now, return 405 as we don't use server-initiated notifications
                 Activator.logInfo("SSE GET request received - returning 405 (not supported)"); //$NON-NLS-1$
-                sendResponse(exchange, 405, "{\"error\": \"Server-initiated SSE not supported\"}"); //$NON-NLS-1$
+                sendResponse(exchange, 405, com.ditrix.edt.mcp.server.protocol.JsonUtils.buildSimpleError("Server-initiated SSE not supported")); //$NON-NLS-1$
             }
             else
             {
                 // Return server info for plain GET requests
-                String response = String.format(
-                    "{\"name\": \"%s\", \"version\": \"%s\", \"edt_version\": \"%s\", \"protocol_version\": \"%s\", \"status\": \"running\"}", //$NON-NLS-1$
+                String response = com.ditrix.edt.mcp.server.protocol.JsonUtils.buildServerInfo(
                     McpConstants.SERVER_NAME,
                     McpConstants.PLUGIN_VERSION,
                     GetEdtVersionTool.getEdtVersion(),
@@ -431,7 +752,7 @@ public class McpServer
                 return;
             }
             
-            String response = "{\"status\": \"ok\", \"edt_version\": \"" + GetEdtVersionTool.getEdtVersion() + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
+            String response = com.ditrix.edt.mcp.server.protocol.JsonUtils.buildHealthResponse(GetEdtVersionTool.getEdtVersion());
             exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
             sendResponse(exchange, 200, response);
         }

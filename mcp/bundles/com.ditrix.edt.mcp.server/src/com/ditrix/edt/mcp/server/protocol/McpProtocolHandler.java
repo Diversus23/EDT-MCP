@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.McpServer;
+import com.ditrix.edt.mcp.server.UserSignal;
 import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.InitializeResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.JsonRpcRequest;
@@ -134,8 +136,34 @@ public class McpProtocolHandler
         // Extract parameters from request arguments
         Map<String, String> params = extractToolParams(request);
         
+        // Set current tool name for status bar display
+        McpServer server = Activator.getDefault() != null ? Activator.getDefault().getMcpServer() : null;
+        if (server != null)
+        {
+            server.setCurrentToolName(tool.getName());
+        }
+        
         // Execute tool
-        String result = tool.execute(params);
+        String result;
+        try
+        {
+            result = tool.execute(params);
+        }
+        finally
+        {
+            // Clear current tool name after execution
+            if (server != null)
+            {
+                server.setCurrentToolName(null);
+            }
+        }
+        
+        // Check if user sent a signal during execution
+        UserSignal signal = null;
+        if (server != null)
+        {
+            signal = server.consumeUserSignal();
+        }
         
         // Check if plain text mode is enabled (Cursor compatibility)
         boolean plainTextMode = Activator.getDefault().getPreferenceStore()
@@ -145,8 +173,19 @@ public class McpProtocolHandler
         switch (tool.getResponseType())
         {
             case JSON:
+                // For JSON, add signal as a separate field if present
+                if (signal != null)
+                {
+                    // Parse JSON and add userSignal field
+                    result = addUserSignalToJson(result, signal);
+                }
                 return buildToolCallJsonResponse(result, requestId);
             case MARKDOWN:
+                // Append user signal as markdown
+                if (signal != null)
+                {
+                    result = result + "\n\n---\n**USER SIGNAL:** " + signal.getMessage();
+                }
                 // In plain text mode, return markdown as plain text instead of embedded resource
                 if (plainTextMode)
                 {
@@ -156,8 +195,44 @@ public class McpProtocolHandler
                 return buildToolCallResourceResponse(result, "text/markdown", fileName, requestId); //$NON-NLS-1$
             case TEXT:
             default:
+                // Append user signal as text
+                if (signal != null)
+                {
+                    result = result + "\n\n---\nUSER SIGNAL: " + signal.getMessage();
+                }
                 return buildToolCallTextResponse(result, requestId);
         }
+    }
+    
+    /**
+     * Adds user signal to a JSON result string using Gson for proper JSON handling.
+     */
+    private String addUserSignalToJson(String jsonResult, UserSignal signal)
+    {
+        try
+        {
+            // Parse the original JSON
+            JsonElement element = JsonParser.parseString(jsonResult);
+            if (element.isJsonObject())
+            {
+                com.google.gson.JsonObject jsonObject = element.getAsJsonObject();
+                
+                // Create userSignal object
+                com.google.gson.JsonObject signalObject = new com.google.gson.JsonObject();
+                signalObject.addProperty("type", signal.getType().name());
+                signalObject.addProperty("message", signal.getMessage());
+                
+                // Add to result
+                jsonObject.add("userSignal", signalObject);
+                
+                return new com.google.gson.Gson().toJson(jsonObject);
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Failed to add user signal to JSON", e);
+        }
+        return jsonResult;
     }
     
     /**
