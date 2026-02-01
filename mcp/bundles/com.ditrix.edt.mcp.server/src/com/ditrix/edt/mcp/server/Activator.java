@@ -16,6 +16,7 @@ import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.lifecycle.IServicesOrchestrator;
+import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com.e1c.g5.dt.applications.IApplicationManager;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
@@ -46,6 +47,7 @@ public class Activator extends AbstractUIPlugin
     private ServiceTracker<IServicesOrchestrator, IServicesOrchestrator> servicesOrchestratorTracker;
     private ServiceTracker<BmAwareResourceSetProvider, BmAwareResourceSetProvider> resourceSetProviderTracker;
     private ServiceTracker<IApplicationManager, IApplicationManager> applicationManagerTracker;
+    private ServiceTracker<INavigatorContentProviderStateProvider, INavigatorContentProviderStateProvider> navigatorStateProviderTracker;
 
     @Override
     public void start(BundleContext context) throws Exception
@@ -84,6 +86,9 @@ public class Activator extends AbstractUIPlugin
         
         applicationManagerTracker = new ServiceTracker<>(context, IApplicationManager.class, null);
         applicationManagerTracker.open();
+        
+        navigatorStateProviderTracker = new ServiceTracker<>(context, INavigatorContentProviderStateProvider.class, null);
+        navigatorStateProviderTracker.open();
         
         logInfo("EDT MCP Server plugin started"); //$NON-NLS-1$
     }
@@ -146,6 +151,11 @@ public class Activator extends AbstractUIPlugin
         {
             applicationManagerTracker.close();
             applicationManagerTracker = null;
+        }
+        if (navigatorStateProviderTracker != null)
+        {
+            navigatorStateProviderTracker.close();
+            navigatorStateProviderTracker = null;
         }
         
         logInfo("EDT MCP Server plugin stopped"); //$NON-NLS-1$
@@ -316,6 +326,21 @@ public class Activator extends AbstractUIPlugin
         }
         return applicationManagerTracker.getService();
     }
+    
+    /**
+     * Returns the INavigatorContentProviderStateProvider service.
+     * Used for controlling navigator content filtering state.
+     * 
+     * @return navigator state provider or null if not available
+     */
+    public INavigatorContentProviderStateProvider getNavigatorStateProvider()
+    {
+        if (navigatorStateProviderTracker == null)
+        {
+            return null;
+        }
+        return navigatorStateProviderTracker.getService();
+    }
 
     /**
      * Returns the default result limit for tools from preferences.
@@ -350,6 +375,22 @@ public class Activator extends AbstractUIPlugin
         {
             plugin.getLog().log(new Status(IStatus.INFO, PLUGIN_ID, message));
         }
+    }
+
+    /**
+     * Logs a debug message.
+     * Only logs if debug mode is enabled (via .options file or preference).
+     * 
+     * @param message the debug message
+     */
+    public static void logDebug(String message)
+    {
+        // Debug logging is currently disabled to avoid excessive output.
+        // Uncomment for troubleshooting:
+        // if (plugin != null && plugin.isDebugging())
+        // {
+        //     plugin.getLog().log(new Status(IStatus.INFO, PLUGIN_ID, "[DEBUG] " + message));
+        // }
     }
 
     /**
