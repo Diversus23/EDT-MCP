@@ -14,12 +14,16 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+import org.eclipse.core.commands.Command;
+import org.eclipse.core.commands.State;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.ui.handlers.RegistryToggleState;
 import org.eclipse.ui.navigator.CommonNavigator;
 import org.eclipse.ui.navigator.CommonViewer;
 
@@ -50,7 +54,19 @@ public class FilterByTagManager {
     private TagSearchFilter tagFilter;
     
     private FilterByTagManager() {
-        // Singleton
+        // Singleton - reset toggle state on creation (fresh start)
+        resetToggleState();
+    }
+    
+    /**
+     * Resets the toggle state of the filter command button to off.
+     * Called at startup to ensure button state matches actual filter state.
+     */
+    private void resetToggleState() {
+        // Delay execution to ensure command service is available
+        org.eclipse.swt.widgets.Display.getDefault().asyncExec(() -> {
+            updateToggleState(false);
+        });
     }
     
     /**
@@ -194,8 +210,19 @@ public class FilterByTagManager {
         
         isFilterActive = true;
         
+        // Update toggle button state
+        updateToggleState(true);
+        
         // Refresh the tree
         viewer.refresh();
+        
+        // Expand tree to show matched objects
+        // Use limited depth to avoid UI freeze on large configurations
+        try {
+            viewer.expandToLevel(3);
+        } catch (Exception e) {
+            // Ignore - may fail if project is being cleaned/closed
+        }
         
         Activator.logInfo("Tag filter activated with " + countSelectedTags() + " tags selected");
     }
@@ -221,10 +248,36 @@ public class FilterByTagManager {
         
         isFilterActive = false;
         
+        // Update toggle button state
+        updateToggleState(false);
+        
         // Refresh the tree
         viewer.refresh();
         
         Activator.logInfo("Tag filter deactivated");
+    }
+    
+    /**
+     * Updates the toggle state of the filter command button.
+     * 
+     * @param active true if filter is active, false otherwise
+     */
+    private void updateToggleState(boolean active) {
+        try {
+            ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+            if (commandService != null) {
+                Command command = commandService.getCommand("com.ditrix.edt.mcp.server.tags.filterByTag");
+                if (command != null) {
+                    State state = command.getState(RegistryToggleState.STATE_ID);
+                    if (state != null) {
+                        state.setValue(active);
+                        commandService.refreshElements("com.ditrix.edt.mcp.server.tags.filterByTag", null);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Ignore - just visual feedback
+        }
     }
     
     private int countSelectedTags() {

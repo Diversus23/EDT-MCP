@@ -20,6 +20,8 @@ import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.groups.model.Group;
+import com.ditrix.edt.mcp.server.groups.ui.GroupNavigatorAdapter;
 import com.ditrix.edt.mcp.server.tags.TagService;
 import com.ditrix.edt.mcp.server.tags.TagUtils;
 import com.ditrix.edt.mcp.server.tags.model.Tag;
@@ -243,6 +245,11 @@ public class TagSearchFilter extends ViewerFilter {
             return hasMatchingChildrenInProject(project);
         }
         
+        // Groups should be visible if any of their children match the filter
+        if (element instanceof GroupNavigatorAdapter groupAdapter) {
+            return hasMatchingChildrenInGroup(groupAdapter);
+        }
+        
         // Check if element matches
         if (element instanceof EObject eObject) {
             // Get the project this EObject belongs to for project-specific matching
@@ -331,6 +338,67 @@ public class TagSearchFilter extends ViewerFilter {
     private boolean hasMatchingChildrenInProject(IProject project) {
         Set<String> projectFqns = matchingFqnsByProject.get(project);
         return projectFqns != null && !projectFqns.isEmpty();
+    }
+    
+    /**
+     * Checks if a group has any children that match the current filter.
+     * A group should be visible if any of its FQNs match the selected tags.
+     */
+    private boolean hasMatchingChildrenInGroup(GroupNavigatorAdapter groupAdapter) {
+        Group group = groupAdapter.getGroup();
+        IProject project = groupAdapter.getProject();
+        
+        Set<String> projectFqns = matchingFqnsByProject.get(project);
+        
+        // In untagged mode with no tagged objects, show all groups
+        if (showUntaggedOnly && (projectFqns == null || projectFqns.isEmpty())) {
+            return !group.getChildren().isEmpty();
+        }
+        
+        if (projectFqns == null || projectFqns.isEmpty()) {
+            return false;
+        }
+        
+        // Check if any child FQN of this group matches
+        for (String childFqn : group.getChildren()) {
+            if (showUntaggedOnly) {
+                // In untagged mode, matchingFqns contains TAGGED objects
+                // So we show the group if any child is NOT in matchingFqns
+                // Also check that no child descendants are tagged
+                if (!matchesFqnOrChildInSet(childFqn, projectFqns)) {
+                    return true;
+                }
+            } else {
+                // Normal mode - show if child or any of its descendants is in matchingFqns
+                if (matchesFqnOrChildInSet(childFqn, projectFqns)) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Checks if an FQN or any of its descendants is in the given set.
+     * For example, if set contains "Catalog.X.Attribute.Y" and fqn is "Catalog.X",
+     * this returns true.
+     */
+    private boolean matchesFqnOrChildInSet(String fqn, Set<String> fqnSet) {
+        // Direct match
+        if (fqnSet.contains(fqn)) {
+            return true;
+        }
+        
+        // Check if any matching FQN is a child of this FQN
+        String prefix = fqn + ".";
+        for (String matchingFqn : fqnSet) {
+            if (matchingFqn.startsWith(prefix)) {
+                return true;
+            }
+        }
+        
+        return false;
     }
     
     /**

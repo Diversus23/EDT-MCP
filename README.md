@@ -531,19 +531,22 @@ Tags are stored in `.settings/metadata-tags.yaml` file in each project. This fil
 
 **Example:**
 ```yaml
-tags:
-  - name: "Important"
-    color: "#FF0000"
-    description: "Critical business logic"
-  - name: "Utils"
-    color: "#00FF00"
-
 assignments:
   CommonModule.Utils:
-    - "Utils"
+    - Utils
   Document.SalesOrder:
-    - "Important"
-    - "Sales"
+    - Important
+    - Sales
+tags:
+  - color: '#FF0000'
+    description: Critical business logic
+    name: Important
+  - color: '#00FF00'
+    description: ''
+    name: Utils
+  - color: '#0066FF'
+    description: Sales department documents
+    name: Sales
 ```
 
 ## Metadata Groups
@@ -661,6 +664,19 @@ groups:
 - Java 17+
 
 ## Version History
+
+<details>
+<summary><strong>1.20.1</strong> - Navigator toolbar buttons: Expand All, Expand Below, Collapse All</summary>
+
+- **New**: Navigator toolbar buttons for tree expansion control
+  - **Expand All**: Expands all nodes in the Navigator tree
+  - **Expand Below**: Expands all children under the selected node
+  - **Collapse All**: Custom collapse button (replaces standard)
+- **Improved**: Toolbar button layout with proper positioning
+
+![Navigator Toolbar Buttons](img/navigator-toolbar-buttons.png)
+
+</details>
 
 <details>
 <summary><strong>1.20.0</strong> - Metadata Groups: custom folder hierarchy in Navigator</summary>
@@ -855,4 +871,4 @@ groups:
 Copyright (c) 2025 DitriX. All rights reserved.
 
 ---
-*EDT MCP Server v1.20.0*
+*EDT MCP Server v1.20.1*

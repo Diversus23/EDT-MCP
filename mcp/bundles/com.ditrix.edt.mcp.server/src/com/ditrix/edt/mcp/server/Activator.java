@@ -98,6 +98,18 @@ public class Activator extends AbstractUIPlugin
         groupService = new com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl();
         ((com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl) groupService).activate();
         
+        // Initialize filter manager to reset toggle state on startup
+        com.ditrix.edt.mcp.server.tags.ui.FilterByTagManager.getInstance();
+        
+        // Initialize navigator toolbar customizer to hide standard Collapse All button
+        org.eclipse.swt.widgets.Display.getDefault().asyncExec(() -> {
+            try {
+                com.ditrix.edt.mcp.server.ui.NavigatorToolbarCustomizer.getInstance().initialize();
+            } catch (Exception e) {
+                logError("Failed to initialize NavigatorToolbarCustomizer", e);
+            }
+        });
+        
         logInfo("EDT MCP Server plugin started"); //$NON-NLS-1$
     }
 
@@ -164,6 +176,29 @@ public class Activator extends AbstractUIPlugin
         {
             navigatorStateProviderTracker.close();
             navigatorStateProviderTracker = null;
+        }
+        
+        // Dispose navigator toolbar customizer
+        try
+        {
+            org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getDefault();
+            if (display != null && !display.isDisposed())
+            {
+                display.syncExec(() -> {
+                    try
+                    {
+                        com.ditrix.edt.mcp.server.ui.NavigatorToolbarCustomizer.getInstance().dispose();
+                    }
+                    catch (Exception e)
+                    {
+                        // Ignore - workbench may be closing
+                    }
+                });
+            }
+        }
+        catch (Exception e)
+        {
+            // Ignore - display may be disposed
         }
         
         // Deactivate group service
