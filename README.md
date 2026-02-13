@@ -867,8 +867,8 @@ groups:
 </details>
 
 ## License
-
-Copyright (c) 2025 DitriX. All rights reserved.
+# Copyright (C) 2026 DitriX
+# Licensed under GNU AGPL v3.0
 
 ---
 *EDT MCP Server v1.20.1*
