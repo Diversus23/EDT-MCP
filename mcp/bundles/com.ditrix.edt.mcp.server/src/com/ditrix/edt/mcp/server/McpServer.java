@@ -46,6 +46,7 @@ import com.ditrix.edt.mcp.server.tools.impl.ListModulesTool;
 import com.ditrix.edt.mcp.server.tools.impl.SearchInCodeTool;
 import com.ditrix.edt.mcp.server.tools.impl.ReadMethodSourceTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetMethodCallHierarchyTool;
+import com.ditrix.edt.mcp.server.tools.impl.ValidateQueryTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -155,6 +156,7 @@ public class McpServer
         registry.register(new ReadMethodSourceTool());
         registry.register(new GetMethodCallHierarchyTool());
         registry.register(new GetFormScreenshotTool());
+        registry.register(new ValidateQueryTool());
 
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
     }
