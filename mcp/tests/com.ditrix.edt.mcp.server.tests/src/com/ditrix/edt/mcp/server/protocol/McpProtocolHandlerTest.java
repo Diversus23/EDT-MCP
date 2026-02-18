@@ -71,6 +71,32 @@ public class McpProtocolHandlerTest
     }
 
     @Test
+    public void testInitializeEchosClientProtocolVersion()
+    {
+        // Per MCP spec: server must echo back client's requested protocol version
+        String request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+            + "\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},"
+            + "\"clientInfo\":{\"name\":\"lmstudio\",\"version\":\"1.0.0\"}}}";
+        String response = handler.processRequest(request);
+
+        JsonObject json = parseResponse(response);
+        String echoed = json.getAsJsonObject("result").get("protocolVersion").getAsString();
+        assertEquals("Server must echo back client's protocol version", "2025-06-18", echoed);
+    }
+
+    @Test
+    public void testInitializeUsesOwnVersionWhenClientVersionMissing()
+    {
+        // When no protocolVersion in params, fall back to server's latest
+        String request = buildJsonRpcRequest(1, "initialize", null);
+        String response = handler.processRequest(request);
+
+        JsonObject json = parseResponse(response);
+        String version = json.getAsJsonObject("result").get("protocolVersion").getAsString();
+        assertEquals(McpConstants.PROTOCOL_VERSION, version);
+    }
+
+    @Test
     public void testInitializePreservesRequestId()
     {
         String request = buildJsonRpcRequest(42, "initialize", null);
@@ -78,6 +104,19 @@ public class McpProtocolHandlerTest
 
         JsonObject json = parseResponse(response);
         assertEquals(42, json.get("id").getAsInt());
+    }
+
+    @Test
+    public void testInitializeWithIdZeroPreservesIntegerType()
+    {
+        // LM Studio sends "id":0 - must not become "id":0.0 in response
+        String request = buildJsonRpcRequest(0, "initialize", null);
+        String response = handler.processRequest(request);
+
+        assertNotNull(response);
+        assertFalse("Response must not contain 0.0 as id", response.contains("\"id\":0.0"));
+        JsonObject json = parseResponse(response);
+        assertEquals(0, json.get("id").getAsInt());
     }
 
     @Test
