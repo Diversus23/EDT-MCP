@@ -59,6 +59,18 @@ public class McpProtocolHandler
             if (request != null && request.getId() != null)
             {
                 requestId = request.getId();
+                // Gson deserializes JSON numbers into Object fields as Double.
+                // Normalize whole-number Doubles to Long so "id":0 serializes
+                // back as 0 (not 0.0), which is required for JSON-RPC ID matching.
+                if (requestId instanceof Double)
+                {
+                    double d = (Double) requestId;
+                    if (!Double.isInfinite(d) && d == Math.floor(d)
+                        && d >= Long.MIN_VALUE && d <= Long.MAX_VALUE)
+                    {
+                        requestId = ((Double) requestId).longValue();
+                    }
+                }
             }
             
             // Validate JSON-RPC version
@@ -73,7 +85,10 @@ public class McpProtocolHandler
             // Check for initialize method
             if (McpConstants.METHOD_INITIALIZE.equals(method))
             {
-                return buildInitializeResponse(requestId);
+                // Per spec: echo back the client's requested protocol version if it is a
+                // known/supported version; otherwise, fall back to our latest version.
+                String clientVersion = request.getStringParam("protocolVersion"); //$NON-NLS-1$
+                return buildInitializeResponse(requestId, clientVersion);
             }
             
             // Check for initialized notification (no response needed, but return 202)
@@ -288,11 +303,17 @@ public class McpProtocolHandler
     
     /**
      * Builds initialize response.
+     * Echoes back the client's requested protocol version (per spec) if it is a
+     * recognized date-format version; otherwise uses our latest version.
      */
-    private String buildInitializeResponse(Object requestId)
+    private String buildInitializeResponse(Object requestId, String clientVersion)
     {
+        // Use the client's version if it looks like a valid MCP version date (YYYY-MM-DD),
+        // otherwise fall back to our supported version.
+        String version = (clientVersion != null && clientVersion.matches("\\d{4}-\\d{2}-\\d{2}")) //$NON-NLS-1$
+            ? clientVersion : McpConstants.PROTOCOL_VERSION;
         InitializeResult result = new InitializeResult(
-            McpConstants.PROTOCOL_VERSION,
+            version,
             McpConstants.SERVER_NAME,
             McpConstants.PLUGIN_VERSION,
             McpConstants.AUTHOR
