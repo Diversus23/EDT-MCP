@@ -27,6 +27,7 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.ApplicationSupport;
 import com.ditrix.edt.mcp.server.utils.ConsentPreview;
 import com.ditrix.edt.mcp.server.utils.DestructiveConsentGate;
+import com.ditrix.edt.mcp.server.utils.ExternalInfobaseChangesPolicy;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchUpdateDialogAutoConfirmer;
@@ -94,6 +95,8 @@ public class UpdateDatabaseTool implements IMcpTool
             .booleanProperty("confirm", //$NON-NLS-1$
                 "true = apply the update; default false = preview only (resolves the target and " //$NON-NLS-1$
                 + "reports what would change WITHOUT mutating the infobase).") //$NON-NLS-1$
+            .stringProperty("externalInfobaseChanges", //$NON-NLS-1$
+                RunYaxunitTestsTool.EXTERNAL_INFOBASE_CHANGES_DESCRIPTION)
             .booleanProperty("terminateRunningClients", //$NON-NLS-1$
                 "Before applying, terminate any 1C client THIS EDT launched on the target infobase " //$NON-NLS-1$
                 + "to free the exclusive lock (default true). false keeps a running client — the " //$NON-NLS-1$
@@ -150,6 +153,13 @@ public class UpdateDatabaseTool implements IMcpTool
         boolean confirm = JsonUtils.extractBooleanArgument(params, "confirm", false); //$NON-NLS-1$
         boolean terminateRunningClients =
             JsonUtils.extractBooleanArgument(params, "terminateRunningClients", true); //$NON-NLS-1$
+        String rawPolicy = JsonUtils.extractStringArgument(params, "externalInfobaseChanges"); //$NON-NLS-1$
+        ExternalInfobaseChangesPolicy externalChanges = ExternalInfobaseChangesPolicy.parse(rawPolicy);
+        if (externalChanges == null)
+        {
+            return ToolResult.error("Unknown externalInfobaseChanges value: '" + rawPolicy //$NON-NLS-1$
+                + "'. Accepted values: " + ExternalInfobaseChangesPolicy.acceptedValues()).toJson(); //$NON-NLS-1$
+        }
 
         boolean hasName = configName != null && !configName.isEmpty();
         String argError = validateDirectArguments(hasName, projectName, applicationId);
@@ -199,7 +209,33 @@ public class UpdateDatabaseTool implements IMcpTool
         }
 
         return updateDatabase(projectName, applicationId, fullUpdate, confirm,
-            terminateRunningClients);
+            terminateRunningClients, externalChanges);
+    }
+
+    /**
+     * The extra sentence the consent preview needs when the infobase turns out to have been changed
+     * OUTSIDE EDT: the configured {@code externalInfobaseChanges} policy decides what happens then,
+     * and one of the answers writes the PROJECT sources rather than the infobase. Approving "an
+     * irreversible infobase update" must not silently cover that.
+     *
+     * @param policy the policy this call runs with (may be {@code null})
+     * @return a sentence to append, or an empty string when there is nothing extra to warn about
+     */
+    private static String externalChangesConsentNote(ExternalInfobaseChangesPolicy policy)
+    {
+        if (policy == ExternalInfobaseChangesPolicy.IMPORT)
+        {
+            return " If the infobase was changed outside EDT since the last EDT interaction, " //$NON-NLS-1$
+                + "externalInfobaseChanges=import will pull those changes into the PROJECT SOURCES " //$NON-NLS-1$
+                + "as well - this run can therefore modify your working tree, not only the infobase."; //$NON-NLS-1$
+        }
+        if (policy == ExternalInfobaseChangesPolicy.OVERRIDE)
+        {
+            return " If the infobase was changed outside EDT since the last EDT interaction, " //$NON-NLS-1$
+                + "externalInfobaseChanges=override will DISCARD those external changes and " //$NON-NLS-1$
+                + "overwrite the infobase with the project configuration."; //$NON-NLS-1$
+        }
+        return ""; //$NON-NLS-1$
     }
 
     /**
@@ -242,11 +278,13 @@ public class UpdateDatabaseTool implements IMcpTool
      * @param confirm false previews without mutating; true applies the update
      * @param terminateRunningClients true (default) frees the infobase by terminating a 1C client
      *            this EDT launched on it before the update; false leaves a running client in place
+     * @param externalChanges how to answer EDT's "Infobase configuration changes" modal when the
+     *            infobase was changed outside EDT since the last EDT interaction
      * @return JSON string with result
      */
     private String updateDatabase(String projectName, String applicationId,
             boolean fullUpdate, boolean confirm,
-            boolean terminateRunningClients)
+            boolean terminateRunningClients, ExternalInfobaseChangesPolicy externalChanges)
     {
         boolean terminatedClient = false;
         try
@@ -288,7 +326,7 @@ public class UpdateDatabaseTool implements IMcpTool
             if (!confirm)
             {
                 return buildPreviewResult(projectName, applicationId, application, updateType,
-                    stateBefore, terminateRunningClients);
+                    stateBefore, terminateRunningClients, externalChanges);
             }
 
             // Destructive-operation consent gate: the LAST check before the (irreversible) infobase
@@ -299,7 +337,8 @@ public class UpdateDatabaseTool implements IMcpTool
                 "Update database", //$NON-NLS-1$
                 "This applies a " + updateType.name() //$NON-NLS-1$
                     + " configuration update to the database of application '" + application.getName() //$NON-NLS-1$
-                    + "' (project " + projectName + "). This mutates the infobase and is irreversible.", //$NON-NLS-1$ //$NON-NLS-2$
+                    + "' (project " + projectName + "). This mutates the infobase and is irreversible." //$NON-NLS-1$ //$NON-NLS-2$
+                    + externalChangesConsentNote(externalChanges),
                 1, java.util.Collections.singletonList(application.getName()));
             DestructiveConsentGate.ConsentDecision consentDecision =
                 DestructiveConsentGate.getInstance().requireConsent(NAME, consentPreview);
@@ -349,14 +388,51 @@ public class UpdateDatabaseTool implements IMcpTool
                 // hangs this unattended call. Arm the restructure matcher to auto-press its default
                 // "Accept" button around the update only — the confirm=true gate already approved the
                 // (irreversible) update, so accepting the platform's re-prompt is the correct completion.
-                LaunchUpdateDialogAutoConfirmer.arm(false, false, true);
-                try
+                // The same update can also raise EDT's "Infobase configuration changes" modal when
+                // the infobase was changed outside EDT since the last EDT interaction; it is answered
+                // by the caller's externalInfobaseChanges policy (default: override the infobase with
+                // the project configuration, i.e. exactly what this tool was asked to do).
+                // Reference-first: EDT's dialog names the REGISTERED infobase, which can differ
+                // from the application's display name — resolving the wrong one would leave every
+                // dialog unattributable and silently degrade override/import to cancel.
+                String infobaseName = LaunchLifecycleUtils.conflictAttributionName(application);
+                try (LaunchUpdateDialogAutoConfirmer.ConflictWatch watch =
+                    LaunchUpdateDialogAutoConfirmer.beginConflictWatch(infobaseName))
                 {
-                    stateAfter = appManager.update(application, updateType, context, monitor);
-                }
-                finally
-                {
-                    LaunchUpdateDialogAutoConfirmer.disarm(false, false, true);
+                    LaunchUpdateDialogAutoConfirmer.arm(false, false, true, externalChanges,
+                        infobaseName);
+                    try
+                    {
+                        stateAfter = appManager.update(application, updateType, context, monitor);
+                    }
+                    catch (ApplicationException ex)
+                    {
+                        // The cancel can ABORT the update instead of letting it return a state: the
+                        // reason is still in the window, and it explains the failure far better than
+                        // EDT's own message - it names the knob that would have let it through.
+                        if (watch.cancelled())
+                        {
+                            return ToolResult.error(ExternalInfobaseChangesPolicy.declinedUpdateError(
+                                externalChanges, watch.reason())).toJson();
+                        }
+                        throw ex;
+                    }
+                    finally
+                    {
+                        LaunchUpdateDialogAutoConfirmer.disarm(false, false, true, externalChanges,
+                            infobaseName);
+                    }
+                    // A cancelled external-changes modal means the update wrote NOTHING. Reporting
+                    // "updated" here would be a false success — and the returned state cannot be
+                    // used to tell the two apart: EDT may hand back a CACHED UPDATED, because the
+                    // process that changed the infobase behind its back emitted no state event. The
+                    // window is per-update, so a cancel recorded in it is this call's by
+                    // construction and is a failure whatever the state says.
+                    if (watch.cancelled())
+                    {
+                        return ToolResult.error(ExternalInfobaseChangesPolicy.declinedUpdateError(
+                            externalChanges, watch.reason())).toJson();
+                    }
                 }
             }
 
@@ -384,9 +460,10 @@ public class UpdateDatabaseTool implements IMcpTool
      * Builds the confirm-preview JSON (no infobase change): resolves and reports the exact
      * IRREVERSIBLE action that confirm=true would apply. Side-effect-free.
      */
-    private static String buildPreviewResult(String projectName, String applicationId,
+    private static String buildPreviewResult(String projectName, String applicationId, // NOSONAR every value is already resolved by the caller; a parameter object would only move the list
             IApplication application, ApplicationUpdateType updateType,
-            ApplicationUpdateState stateBefore, boolean terminateRunningClients)
+            ApplicationUpdateState stateBefore, boolean terminateRunningClients,
+            ExternalInfobaseChangesPolicy externalChanges)
     {
         return ToolResult.success()
             .put(McpKeys.ACTION, "preview") //$NON-NLS-1$
@@ -404,6 +481,7 @@ public class UpdateDatabaseTool implements IMcpTool
                 + (terminateRunningClients
                     ? " It will first terminate any 1C client this EDT launched on the infobase." //$NON-NLS-1$
                     : "") //$NON-NLS-1$
+                + externalChangesConsentNote(externalChanges)
                 + " Re-call with confirm=true to apply it.") //$NON-NLS-1$
             .toJson();
     }

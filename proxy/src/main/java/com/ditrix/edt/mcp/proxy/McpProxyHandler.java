@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.sun.net.httpserver.HttpExchange;
@@ -31,12 +32,16 @@ import com.sun.net.httpserver.HttpHandler;
  * itself (via {@link SessionManager}) and answers {@code initialize} / {@code ping} /
  * {@code router_status} / {@code router_refresh} locally instead of forwarding them.
  * <p>
- * {@code tools/list} is forwarded to the first live backend and has the two
+ * {@code tools/list} is forwarded to the backend {@link BackendRegistry#toolsListDonor()}
+ * picks (the lowest-port one that supports the machine project list, so a mixed-version fleet
+ * does not publish an outdated descriptor set) and has the two
  * {@code router_*} tool descriptors injected before being cached and returned; a
  * {@code tools/call} (and any other method) is routed via {@link ProjectRouter} to one
  * backend (forwarded WITH the client's own {@code Accept} header - see
  * {@link #forwardToBackend} - and streamed back byte-for-byte, so the relayed framing is the
- * one the client actually asked for), fanned out across every live backend
+ * one the client actually asked for; the ONE exception is a tool call from a session that opted out
+ * of {@code structuredContent}, whose response is rewritten to move that payload into the text
+ * channel, since the backends share a handshake made by the proxy and cannot apply that gate), fanned out across every live backend
  * ({@code list_projects}), answered by the proxy itself (the router tools), or refused with
  * an actionable error. A backend {@link IOException} triggers a registry refresh and an
  * actionable error naming the dead port; no exception ever escapes {@link #handle(HttpExchange)}.
@@ -50,6 +55,12 @@ public final class McpProxyHandler implements HttpHandler
     // com.ditrix.edt.mcp.server.protocol.McpConstants — the proxy module has no compile
     // dependency on the plugin, so the literal values are duplicated here).
     // ------------------------------------------------------------------------------------
+
+    /** {@code list_projects} argument selecting the output format. */
+    private static final String ARG_FORMAT = "format"; //$NON-NLS-1$
+
+    /** {@link #ARG_FORMAT} value asking a backend for the machine-readable project list. */
+    private static final String FORMAT_JSON = "json"; //$NON-NLS-1$
 
     private static final String HEADER_SESSION_ID = "Mcp-Session-Id"; //$NON-NLS-1$
     private static final String HEADER_ACCEPT = "Accept"; //$NON-NLS-1$
@@ -89,10 +100,13 @@ public final class McpProxyHandler implements HttpHandler
 
     private static final String KEY_METHOD = "method"; //$NON-NLS-1$
     private static final String KEY_PARAMS = "params"; //$NON-NLS-1$
+    private static final String KEY_ARGUMENTS = "arguments"; //$NON-NLS-1$
     private static final String KEY_NAME = "name"; //$NON-NLS-1$
     private static final String KEY_ID = "id"; //$NON-NLS-1$
     private static final String KEY_JSONRPC = "jsonrpc"; //$NON-NLS-1$
     private static final String KEY_RESULT = "result"; //$NON-NLS-1$
+    private static final String KEY_STRUCTURED_CONTENT = "structuredContent"; //$NON-NLS-1$
+    private static final String KEY_CONTENT = "content"; //$NON-NLS-1$
     private static final String KEY_PROTOCOL_VERSION = "protocolVersion"; //$NON-NLS-1$
     private static final String KEY_CAPABILITIES = "capabilities"; //$NON-NLS-1$
     private static final String KEY_TOOLS = "tools"; //$NON-NLS-1$
@@ -210,7 +224,9 @@ public final class McpProxyHandler implements HttpHandler
 
         String jsonRpcMethod = Json.str(requestJson, KEY_METHOD);
         boolean isInitialize = METHOD_INITIALIZE.equals(jsonRpcMethod);
-        if (!isInitialize && !requireValidSession(exchange, requestId))
+        Boolean sessionCapability = isInitialize ? null
+            : sessions.capabilityOf(exchange.getRequestHeaders().getFirst(HEADER_SESSION_ID));
+        if (!isInitialize && !requireValidSession(exchange, requestId, sessionCapability))
         {
             return;
         }
@@ -235,7 +251,8 @@ public final class McpProxyHandler implements HttpHandler
             handleToolsList(exchange, rawBody, requestId);
             return;
         }
-        handleRouted(exchange, jsonRpcMethod, rawBody, requestJson, requestId);
+        handleRouted(exchange, jsonRpcMethod, rawBody, requestJson, requestId,
+            !Boolean.FALSE.equals(sessionCapability));
     }
 
     /**
@@ -246,7 +263,8 @@ public final class McpProxyHandler implements HttpHandler
      *
      * @return {@code true} when the session is valid and dispatch should continue
      */
-    private boolean requireValidSession(HttpExchange exchange, Object requestId) throws IOException
+    private boolean requireValidSession(HttpExchange exchange, Object requestId, Boolean capability)
+        throws IOException
     {
         String sessionId = exchange.getRequestHeaders().getFirst(HEADER_SESSION_ID);
         if (sessionId == null || sessionId.isBlank())
@@ -255,7 +273,9 @@ public final class McpProxyHandler implements HttpHandler
                 "Missing " + HEADER_SESSION_ID + " header - call initialize first.", requestId)); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
-        if (!sessions.isValid(sessionId))
+        // Judged by the SAME lookup whose value the request will use, so a session closed
+        // concurrently cannot be validated here and then read as an unknown (permissive) one later.
+        if (capability == null)
         {
             sendPlain(exchange, 404, buildJsonRpcError(ERROR_INVALID_REQUEST,
                 "Unknown or expired session '" + sessionId + "' - call initialize again.", requestId)); //$NON-NLS-1$ //$NON-NLS-2$
@@ -289,7 +309,9 @@ public final class McpProxyHandler implements HttpHandler
         result.add(KEY_CAPABILITIES, capabilities);
         result.add(KEY_SERVER_INFO, serverInfo);
 
-        String sessionId = sessions.create();
+        // The session remembers ITS client's structuredContent capability: the proxy terminates the
+        // handshake, so no backend ever sees it, and several clients can share one proxy.
+        String sessionId = sessions.create(readStructuredContentCapability(requestJson));
         if (sessionId == null)
         {
             sendMcpResponse(exchange, 200, buildJsonRpcError(ERROR_INTERNAL,
@@ -308,7 +330,9 @@ public final class McpProxyHandler implements HttpHandler
     }
 
     /**
-     * Serves {@code tools/list}: forwards the raw request to the first live backend, injects
+     * Serves {@code tools/list}: forwards the raw request to the DONOR backend (see
+     * {@link BackendRegistry#toolsListDonor()} - the lowest-port one that supports the machine
+     * project list, so a mixed-version fleet does not publish an outdated descriptor set), injects
      * the two {@code router_*} descriptors, and caches the injected response. With zero live
      * backends, serves the cache (re-stamped with the caller's request id) when one exists,
      * or a minimal list containing ONLY the router tools otherwise.
@@ -324,7 +348,20 @@ public final class McpProxyHandler implements HttpHandler
             return;
         }
 
-        Backend backend = live.get(0);
+        // NOT simply the lowest port: in a mixed-version fleet that one may run a plugin whose
+        // list_projects has no 'format' parameter, and publishing its descriptors would hide the
+        // machine contract from schema-driven clients. Read ONCE - a refresh between the emptiness
+        // check above and this call can leave no backend at all.
+        Backend backend = registry.toolsListDonor();
+        if (backend == null)
+        {
+            // The registry emptied between the check above and this read: answer the same way the
+            // zero-backend path does rather than dereferencing nothing.
+            String cached = registry.cachedToolsListResponse();
+            sendMcpResponse(exchange, 200,
+                cached != null ? rewriteId(cached, requestId) : minimalToolsListResponse(requestId), null);
+            return;
+        }
         try
         {
             HttpResponse<InputStream> response = backend.forward(rawBody);
@@ -360,25 +397,26 @@ public final class McpProxyHandler implements HttpHandler
      * error for any other method.
      */
     private void handleRouted(HttpExchange exchange, String jsonRpcMethod, String rawBody, JsonObject requestJson,
-        Object requestId) throws IOException
+        Object requestId, boolean allowStructuredContent) throws IOException
     {
         boolean isToolCall = METHOD_TOOLS_CALL.equals(jsonRpcMethod);
         ProjectRouter.RouteResult route = router.route(jsonRpcMethod, requestJson);
         switch (route.kind)
         {
             case BACKEND:
-                forwardToBackend(exchange, route.backend, rawBody, isToolCall, requestId);
+                forwardToBackend(exchange, route.backend, rawBody, isToolCall, requestId,
+                    allowStructuredContent);
                 break;
             case FAN_OUT_LIST_PROJECTS:
-                handleFanOut(exchange, requestId);
+                handleFanOut(exchange, requestId, wantsJsonFormat(requestJson), allowStructuredContent);
                 break;
             case PROXY_SELF:
-                handleProxySelf(exchange, requestJson, requestId);
+                handleProxySelf(exchange, requestJson, requestId, allowStructuredContent);
                 break;
             case ERROR:
             default:
                 String body = isToolCall
-                    ? RouterTools.toolCallError(route.errorMessage, requestId)
+                    ? RouterTools.toolCallError(route.errorMessage, requestId, allowStructuredContent)
                     : buildJsonRpcError(ERROR_BACKEND_UNREACHABLE, route.errorMessage, requestId);
                 sendMcpResponse(exchange, 200, body, null);
                 break;
@@ -389,25 +427,41 @@ public final class McpProxyHandler implements HttpHandler
      * Forwards {@code rawBody} to {@code backend} - WITH the client's own {@code Accept}
      * header (see {@link Backend#forward(String, String)}), so the backend answers in the
      * framing that client actually asked for - and streams its response back byte-for-byte
-     * (status, {@code Content-Type}, chunked body copy). On an {@link IOException} the
+     * (status, {@code Content-Type}, chunked body copy). The ONE exception is a {@code tools/call}
+     * from a session that opted OUT of {@code structuredContent}: that response is buffered and
+     * rewritten by {@link #relayWithoutStructuredContent}, because the backends share a handshake
+     * made by the proxy and cannot apply that gate themselves. On an {@link IOException} the
      * registry is refreshed and an actionable error naming the dead port is returned instead
      * (in the tool-call error shape for a {@code tools/call}, a plain JSON-RPC error otherwise).
      */
     private void forwardToBackend(HttpExchange exchange, Backend backend, String rawBody, boolean isToolCall,
-        Object requestId) throws IOException
+        Object requestId, boolean allowStructuredContent) throws IOException
     {
         try
         {
             String clientAccept = exchange.getRequestHeaders().getFirst(HEADER_ACCEPT);
             HttpResponse<InputStream> response = backend.forward(rawBody, clientAccept);
-            streamBackendResponse(exchange, response);
+            if (isToolCall && !allowStructuredContent)
+            {
+                // The backends share ONE handshake, made by the proxy with its own capabilities, so a
+                // backend cannot know this client opted out - and a byte-for-byte relay would hand it
+                // the structuredContent it declared it cannot accept. Rewrite instead: the payload
+                // moves into the text channel, exactly like a direct call to that backend by such a
+                // client. Only tool calls, and only for an opted-out session, take this path - whatever
+                // the HTTP status: a non-200 body can carry the field just as well.
+                relayWithoutStructuredContent(exchange, response, requestId);
+            }
+            else
+            {
+                streamBackendResponse(exchange, response);
+            }
         }
         catch (IOException e)
         {
             registry.refresh();
             String message = deadBackendMessage(backend.getPort());
             String body = isToolCall
-                ? RouterTools.toolCallError(message, requestId)
+                ? RouterTools.toolCallError(message, requestId, allowStructuredContent)
                 : buildJsonRpcError(ERROR_BACKEND_UNREACHABLE, message, requestId);
             sendMcpResponse(exchange, 200, body, null);
         }
@@ -420,12 +474,55 @@ public final class McpProxyHandler implements HttpHandler
     }
 
     /**
+     * Whether the CLIENT asked {@code list_projects} for {@code format=json}. The fan-out always
+     * queries the backends with {@code format=json} (the merge needs the machine list), but the
+     * merged response must be shaped like a direct call of the format the client actually requested:
+     * the human table by default, the machine payload only when asked for.
+     *
+     * @param requestJson the parsed JSON-RPC request
+     * @return {@code true} when the caller passed {@code format=json}
+     */
+    private static boolean wantsJsonFormat(JsonObject requestJson)
+    {
+        JsonObject arguments = Json.obj(Json.obj(requestJson, KEY_PARAMS), KEY_ARGUMENTS);
+        String format = Json.str(arguments, ARG_FORMAT);
+        return format != null && FORMAT_JSON.equalsIgnoreCase(format.trim());
+    }
+
+    /**
+     * Whether the client's {@code initialize} allows {@code structuredContent}. Only an explicit
+     * {@code capabilities.experimental.structuredContent == false} opts out - an absent block, an empty
+     * one or a non-boolean value keeps the permissive default, exactly like the plugin.
+     *
+     * @param requestJson the parsed initialize request
+     * @return {@code false} only when the client explicitly opted out
+     */
+    private static boolean readStructuredContentCapability(JsonObject requestJson)
+    {
+        JsonObject experimental =
+            Json.obj(Json.obj(Json.obj(requestJson, KEY_PARAMS), KEY_CAPABILITIES), "experimental"); //$NON-NLS-1$
+        if (experimental == null)
+        {
+            return true;
+        }
+        JsonElement flag = experimental.get("structuredContent"); //$NON-NLS-1$
+        if (flag == null || !flag.isJsonPrimitive() || !flag.getAsJsonPrimitive().isBoolean())
+        {
+            return true;
+        }
+        return flag.getAsBoolean();
+    }
+
+    /**
      * Calls {@code list_projects} on every live backend and merges the results via
      * {@link FanOut#mergeListProjects}. A backend that fails the call simply contributes no
      * response (mirroring the registry's own defensive {@code list_projects} handling); the
-     * registry is refreshed once when at least one backend failed.
+     * registry is refreshed once when at least one backend failed. The merge is told whether the
+     * CALLING SESSION's client accepts {@code structuredContent}: the proxy answered that handshake
+     * itself, so the backends never saw the capability and the gate has to be applied here.
      */
-    private void handleFanOut(HttpExchange exchange, Object requestId) throws IOException
+    private void handleFanOut(HttpExchange exchange, Object requestId, boolean jsonFormat,
+        boolean allowStructuredContent) throws IOException
     {
         List<Backend> live = registry.live();
         List<String> responses = new ArrayList<>(live.size());
@@ -434,7 +531,13 @@ public final class McpProxyHandler implements HttpHandler
         {
             try
             {
-                responses.add(backend.callToolBlocking(ProjectRouter.TOOL_LIST_PROJECTS, new JsonObject()));
+                // Always ask for the MACHINE payload: the merge reads structuredContent.projects, and
+                // the human table of the merged response is re-rendered from it. A backend whose
+                // plugin ignores the parameter answers without structuredContent and contributes
+                // nothing - the registry reports it as an unsupported plugin version.
+                JsonObject arguments = new JsonObject();
+                arguments.addProperty(ARG_FORMAT, FORMAT_JSON);
+                responses.add(backend.callToolBlocking(ProjectRouter.TOOL_LIST_PROJECTS, arguments));
             }
             catch (IOException e)
             {
@@ -451,17 +554,184 @@ public final class McpProxyHandler implements HttpHandler
         {
             registry.refresh();
         }
-        sendMcpResponse(exchange, 200, FanOut.mergeListProjects(responses, requestId), null);
+        sendMcpResponse(exchange, 200,
+            FanOut.mergeListProjects(responses, requestId, jsonFormat, allowStructuredContent), null);
     }
 
     /** Answers {@code router_status} / {@code router_refresh} itself via {@link RouterTools}. */
-    private void handleProxySelf(HttpExchange exchange, JsonObject requestJson, Object requestId) throws IOException
+    private void handleProxySelf(HttpExchange exchange, JsonObject requestJson, Object requestId,
+        boolean allowStructuredContent) throws IOException
     {
         String toolName = Json.str(Json.obj(requestJson, KEY_PARAMS), KEY_NAME);
         String body = ProjectRouter.TOOL_ROUTER_REFRESH.equals(toolName)
-            ? RouterTools.routerRefresh(registry, requestId)
-            : RouterTools.routerStatus(registry, requestId);
+            ? RouterTools.routerRefresh(registry, requestId, allowStructuredContent)
+            : RouterTools.routerStatus(registry, requestId, allowStructuredContent);
         sendMcpResponse(exchange, 200, body, null);
+    }
+
+    /**
+     * Relays a backend {@code tools/call} response to a client that cannot accept
+     * {@code structuredContent}: the structured payload is moved into {@code content} as text and the
+     * field is dropped, mirroring the plugin's own text-only response for such a client. A response
+     * that carries no {@code structuredContent} (a Markdown tool) is passed through unchanged, and so
+     * is anything that is not parseable JSON.
+     *
+     * @param exchange the client exchange to answer
+     * @param response the backend response
+     * @param requestId the JSON-RPC id, used when the response cannot be downgraded
+     */
+    private void relayWithoutStructuredContent(HttpExchange exchange, HttpResponse<InputStream> response,
+        Object requestId) throws IOException
+    {
+        String raw;
+        try (InputStream in = response.body())
+        {
+            byte[] bytes = in.readNBytes(MAX_BODY_BYTES + 1);
+            if (bytes.length > MAX_BODY_BYTES)
+            {
+                // Too big to rewrite in memory. Relaying it as-is would leak the very field this
+                // client rejected, so answer with an actionable tool error instead.
+                sendMcpResponse(exchange, 200, RouterTools.toolCallError(
+                    "The backend's response is larger than " + MAX_BODY_BYTES + " bytes, which this " //$NON-NLS-1$ //$NON-NLS-2$
+                        + "client's structuredContent opt-out cannot be applied to. Narrow the " //$NON-NLS-1$
+                        + "request, or connect without the opt-out.", requestId, false), null); //$NON-NLS-1$
+                return;
+            }
+            raw = new String(bytes, StandardCharsets.UTF_8);
+        }
+        // Rewritten IN PLACE, line by line, so a multi-event SSE body keeps every event, its order
+        // and its framing (id/event lines) - collapsing it to the last event would drop progress
+        // notifications the client is entitled to.
+        String rewritten = rewriteEnvelopes(raw);
+        response.headers().firstValue(HEADER_CONTENT_TYPE)
+            .ifPresent(contentType -> exchange.getResponseHeaders().add(HEADER_CONTENT_TYPE, contentType));
+        writeBytes(exchange, response.statusCode(), rewritten.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Applies {@link #withoutStructuredContent} to every JSON-RPC envelope in a response body, be it
+     * a bare JSON object or an SSE stream. Every non-{@code data:} line is copied verbatim.
+     *
+     * @param raw the backend's response body
+     * @return the body with each envelope's structured payload moved into its text channel
+     */
+    static String rewriteEnvelopesForTest(String raw)
+    {
+        return rewriteEnvelopes(raw);
+    }
+
+    private static String rewriteEnvelopes(String raw)
+    {
+        if (raw.stripLeading().startsWith("{")) //$NON-NLS-1$
+        {
+            return withoutStructuredContent(raw);
+        }
+        // Only a BLANK line ends an SSE event: 'event:' and 'id:' may sit between two 'data:' lines of
+        // the same event, whose payload the client joins with a newline. The whole event is therefore
+        // buffered - its lines kept IN ORDER, with the data ones marked - and its payload rewritten as
+        // ONE envelope; parsing the fragments separately would parse nothing and the field this path
+        // exists to remove would survive.
+        boolean endsWithNewline = raw.endsWith("\n"); //$NON-NLS-1$
+        String[] lines = raw.split("\n", -1); //$NON-NLS-1$
+        int lineCount = endsWithNewline ? lines.length - 1 : lines.length;
+        List<String> out = new ArrayList<>();
+        List<String> eventLines = new ArrayList<>();
+        List<Integer> dataIndexes = new ArrayList<>();
+        boolean crlf = false;
+        for (int i = 0; i < lineCount; i++)
+        {
+            String line = lines[i];
+            crlf = crlf || line.endsWith("\r"); //$NON-NLS-1$
+            if (line.startsWith("data:")) //$NON-NLS-1$
+            {
+                dataIndexes.add(eventLines.size());
+                eventLines.add(line);
+            }
+            else if (stripCarriageReturn(line).isEmpty())
+            {
+                flushEvent(out, eventLines, dataIndexes, crlf);
+                out.add(line);
+            }
+            else
+            {
+                eventLines.add(line);
+            }
+        }
+        flushEvent(out, eventLines, dataIndexes, crlf);
+        return String.join("\n", out) + (endsWithNewline ? "\n" : ""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Emits one buffered SSE event.
+     * <p>
+     * When the event's joined payload needed no rewrite (a notification, a Markdown tool, a body we
+     * cannot parse) every line is emitted VERBATIM, each data line still in its own place - joining
+     * them would push a raw newline into the field and cut the event short. When it WAS rewritten,
+     * the first data line carries the whole new envelope (compact JSON, hence single-line) and the
+     * remaining fragments are dropped.
+     *
+     * @param out the lines of the body being rebuilt
+     * @param eventLines the event's lines, in order (cleared)
+     * @param dataIndexes the positions of the event's data lines within {@code eventLines} (cleared)
+     * @param crlf whether the body uses CRLF line endings
+     */
+    private static void flushEvent(List<String> out, List<String> eventLines, List<Integer> dataIndexes,
+        boolean crlf)
+    {
+        if (!dataIndexes.isEmpty())
+        {
+            StringBuilder payload = new StringBuilder();
+            for (int index : dataIndexes)
+            {
+                if (payload.length() > 0)
+                {
+                    payload.append('\n');
+                }
+                payload.append(
+                    stripCarriageReturn(eventLines.get(index).substring("data:".length())).stripLeading()); //$NON-NLS-1$
+            }
+            String rewritten = withoutStructuredContent(payload.toString());
+            if (!rewritten.contentEquals(payload))
+            {
+                eventLines.set(dataIndexes.get(0), "data: " + rewritten + (crlf ? "\r" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                for (int i = dataIndexes.size() - 1; i >= 1; i--)
+                {
+                    eventLines.remove((int)dataIndexes.get(i));
+                }
+            }
+        }
+        out.addAll(eventLines);
+        eventLines.clear();
+        dataIndexes.clear();
+    }
+
+    /** The line without its trailing carriage return, if any. */
+    private static String stripCarriageReturn(String line)
+    {
+        return line.endsWith("\r") ? line.substring(0, line.length() - 1) : line; //$NON-NLS-1$
+    }
+
+    /**
+     * Moves an envelope's {@code result.structuredContent} into {@code content} as capped text and
+     * drops the field - the shape the plugin itself returns to a client that cannot accept it.
+     * Anything without that field (a Markdown tool, an error, a notification, an unparseable body) is
+     * returned unchanged.
+     *
+     * @param envelopeJson one JSON-RPC envelope
+     * @return the rewritten envelope, or the input when there is nothing to move
+     */
+    private static String withoutStructuredContent(String envelopeJson)
+    {
+        JsonObject envelope = Json.parseObject(envelopeJson);
+        JsonObject result = envelope == null ? null : Json.obj(envelope, KEY_RESULT);
+        JsonElement structured = result == null ? null : result.get(KEY_STRUCTURED_CONTENT);
+        if (structured == null)
+        {
+            return envelopeJson;
+        }
+        result.remove(KEY_STRUCTURED_CONTENT);
+        result.add(KEY_CONTENT, FanOut.textContent(FanOut.capText(Json.compact(structured))));
+        return Json.compact(envelope);
     }
 
     /**

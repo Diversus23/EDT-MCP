@@ -33,6 +33,7 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.debug.core.DebugPlugin;
+import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.ILaunchConfigurationType;
@@ -47,6 +48,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.ExternalInfobaseChangesPolicy;
 import com.ditrix.edt.mcp.server.utils.InfobaseAuthDialogSuppressor;
 import com.ditrix.edt.mcp.server.utils.JUnitMarkdownFormatter;
 import com.ditrix.edt.mcp.server.utils.JUnitTestResults;
@@ -155,11 +157,26 @@ public class RunYaxunitTestsTool implements IMcpTool
                     + "never served from a cache — a completed run is re-executed on the next identical " //$NON-NLS-1$
                     + "call regardless of this flag.") //$NON-NLS-1$
             .stringProperty("updateScope", UPDATE_SCOPE_DESCRIPTION) //$NON-NLS-1$
+            .stringProperty("externalInfobaseChanges", //$NON-NLS-1$
+                EXTERNAL_INFOBASE_CHANGES_DESCRIPTION) //$NON-NLS-1$
             .booleanProperty("debug", //$NON-NLS-1$
                 "Default false: poll and return the report. true: launch in DEBUG mode so breakpoints " //$NON-NLS-1$
                     + "fire, return immediately and call wait_for_break next (ignores timeout).") //$NON-NLS-1$
             .build();
     }
+
+    /**
+     * Shared schema doc for the {@code externalInfobaseChanges} parameter (also forwarded by
+     * the {@code debug_yaxunit_tests} alias and reused by {@code debug_launch} /
+     * {@code update_database}).
+     */
+    static final String EXTERNAL_INFOBASE_CHANGES_DESCRIPTION =
+        "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was " //$NON-NLS-1$
+            + "changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: " //$NON-NLS-1$
+            + "'override' (default) keeps the project configuration and overwrites the infobase, " //$NON-NLS-1$
+            + "'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update " //$NON-NLS-1$
+            + "with an error. Omitted, the modal is still answered (with 'override'), so an " //$NON-NLS-1$
+            + "unattended call never blocks on it."; //$NON-NLS-1$
 
     /**
      * Shared schema doc for the {@code updateScope} parameter (also forwarded by
@@ -186,6 +203,91 @@ public class RunYaxunitTestsTool implements IMcpTool
     static boolean shouldSweepExistingClientSession(boolean updateBeforeLaunch)
     {
         return updateBeforeLaunch;
+    }
+
+    /**
+     * The actionable message for a launch window whose external-changes dialog was cancelled, or
+     * {@code null} when nothing was cancelled (or no window was opened because the caller armed no
+     * policy).
+     *
+     * <p>This is the standalone-server case: {@code prepareForFreshLaunch} defers that
+     * application's DB update to EDT's launch delegate, so the launch window is the only place the
+     * conflict can appear - and without this the run would only fail later, generically.
+     *
+     * <p>Pure read: the window is CLOSED by the same {@code finally} that disarms the confirmer, so
+     * a launch that throws cannot leave it registered.
+     *
+     * @param conflicts the window opened around the launch (may be {@code null})
+     * @param policy the policy the call ran with (may be {@code null})
+     * @return the message, or {@code null}
+     */
+    private static String declinedConflict(LaunchUpdateDialogAutoConfirmer.ConflictWatch conflicts,
+        ExternalInfobaseChangesPolicy policy)
+    {
+        if (conflicts == null || !conflicts.cancelled())
+        {
+            return null;
+        }
+        return ExternalInfobaseChangesPolicy.declinedUpdateError(policy, conflicts.reason());
+    }
+
+    /** Closes a conflict window when one was opened; never throws. */
+    private static void closeQuietly(LaunchUpdateDialogAutoConfirmer.ConflictWatch conflicts)
+    {
+        if (conflicts != null)
+        {
+            conflicts.close();
+        }
+    }
+
+    /**
+     * Terminates a launch this tool refuses to keep, best-effort: the caller is already reporting
+     * the real failure, and a client left running against a not-updated infobase is worse than a
+     * logged termination error.
+     *
+     * @param launch the launch to stop (may be {@code null})
+     */
+    private static void terminateQuietly(ILaunch launch)
+    {
+        if (launch == null)
+        {
+            return;
+        }
+        try
+        {
+            if (launch.canTerminate())
+            {
+                launch.terminate();
+            }
+        }
+        catch (DebugException e)
+        {
+            Activator.logError("Failed to terminate a YAXUnit launch refused after a cancelled " //$NON-NLS-1$
+                + "external-changes dialog", e); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Reads the target project name straight off a launch configuration — the source that is
+     * populated however the caller addressed the run (by name, or by project + application).
+     *
+     * @param config the launch configuration (may be {@code null})
+     * @return the project name, or {@code null} when it cannot be read
+     */
+    private static String configProjectName(ILaunchConfiguration config)
+    {
+        if (config == null)
+        {
+            return null;
+        }
+        try
+        {
+            return config.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, (String)null);
+        }
+        catch (CoreException e) // NOSONAR a best-effort hint must never break the launch
+        {
+            return null;
+        }
     }
 
     /**
@@ -251,6 +353,13 @@ public class RunYaxunitTestsTool implements IMcpTool
         boolean updateBeforeLaunch = JsonUtils.extractBooleanArgument(params, //$NON-NLS-1$
             "updateBeforeLaunch", true); //$NON-NLS-1$
         String updateScope = JsonUtils.extractStringArgument(params, "updateScope"); //$NON-NLS-1$
+        String rawPolicy = JsonUtils.extractStringArgument(params, "externalInfobaseChanges"); //$NON-NLS-1$
+        ExternalInfobaseChangesPolicy externalChanges = ExternalInfobaseChangesPolicy.parse(rawPolicy);
+        if (externalChanges == null)
+        {
+            return ToolResult.error("Unknown externalInfobaseChanges value: '" + rawPolicy //$NON-NLS-1$
+                + "'. Accepted values: " + ExternalInfobaseChangesPolicy.acceptedValues()).toJson(); //$NON-NLS-1$
+        }
         boolean debug = JsonUtils.extractBooleanArgument(params, "debug", false); //$NON-NLS-1$ //$NON-NLS-2$
 
         boolean hasName = configName != null && !configName.isEmpty();
@@ -271,7 +380,7 @@ public class RunYaxunitTestsTool implements IMcpTool
         purgeTerminatedLaunches();
 
         return runTests(new RunRequest(configName, projectName, applicationId, extensions, modules,
-            tests, timeout, updateBeforeLaunch, updateScope, debug));
+            tests, timeout, updateBeforeLaunch, updateScope, externalChanges, debug));
     }
 
     /**
@@ -292,11 +401,12 @@ public class RunYaxunitTestsTool implements IMcpTool
         final int timeout;
         final boolean updateBeforeLaunch;
         final String updateScope;
+        final ExternalInfobaseChangesPolicy externalChanges;
         final boolean debug;
 
         RunRequest(String configName, String projectName, String applicationId, String extensions, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
                 String modules, String tests, int timeout, boolean updateBeforeLaunch,
-                String updateScope, boolean debug)
+                String updateScope, ExternalInfobaseChangesPolicy externalChanges, boolean debug)
         {
             this.configName = configName;
             this.projectName = projectName;
@@ -307,6 +417,7 @@ public class RunYaxunitTestsTool implements IMcpTool
             this.timeout = timeout;
             this.updateBeforeLaunch = updateBeforeLaunch;
             this.updateScope = updateScope;
+            this.externalChanges = externalChanges;
             this.debug = debug;
         }
     }
@@ -370,13 +481,17 @@ public class RunYaxunitTestsTool implements IMcpTool
             {
                 return launchDebugMode(matchingConfig, project, projectName, applicationId,
                     appManager, launchManager, req.extensions, req.modules, req.tests,
-                    req.updateBeforeLaunch, req.updateScope);
+                    req.updateBeforeLaunch, req.updateScope, req.externalChanges);
             }
 
             // Use the launch config name as the run-key root — stable across
             // (project, applicationId) vs. launchConfigurationName call styles.
+            // The conflict policy is part of the key: a run started under one
+            // externalInfobaseChanges answer must never be reused (or its report delivered) for a
+            // later call that asked for a different one.
             String runKey = matchingConfig.getName() + ":" //$NON-NLS-1$
-                    + sha1(safe(req.extensions) + "|" + safe(req.modules) + "|" + safe(req.tests)); //$NON-NLS-1$ //$NON-NLS-2$
+                    + sha1(safe(req.extensions) + "|" + safe(req.modules) + "|" + safe(req.tests) //$NON-NLS-1$ //$NON-NLS-2$
+                        + "|" + req.externalChanges.wireValue()); //$NON-NLS-1$
             Path reportDir = stableReportDir(runKey);
 
             // If a launch is already running for this key, just poll it.
@@ -419,10 +534,14 @@ public class RunYaxunitTestsTool implements IMcpTool
             {
                 if (req.updateBeforeLaunch)
                 {
-                    String prepKey = LaunchLifecycleUtils.prepKeyFor(projectName, applicationId);
+                    // The policy is part of the key: a piggybacking call must never inherit a
+                    // DIFFERENT caller's answer to the external-changes modal (one of the answers
+                    // rewrites project sources). Same project+application+policy still share one prep.
+                    String prepKey = LaunchLifecycleUtils.prepKeyFor(projectName, applicationId)
+                        + "|" + req.externalChanges.wireValue(); //$NON-NLS-1$
                     final PreLaunchResult[] resultHolder = new PreLaunchResult[1];
                     PrepRequest prepReq = new PrepRequest(projectName, launchManager, project,
-                        applicationId, appManager, req.updateScope,
+                        applicationId, appManager, req.updateScope, req.externalChanges,
                         "YAXUnit pre-launch preparation for " + projectName); //$NON-NLS-1$
 
                     String pendingOrError = awaitPreparedOrPending(prepKey, prepReq, resultHolder);
@@ -536,16 +655,65 @@ public class RunYaxunitTestsTool implements IMcpTool
         // Manual EDT launches outside this window still prompt
         // normally.
         boolean[] armFlags = runPathArmFlags(req.updateBeforeLaunch);
-        LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1]);
+        // The conflict matcher follows the same opt-out as the update matcher, and matters
+        // most for a STANDALONE-SERVER application: there the pre-launch update is deferred
+        // to EDT's launch delegate, so this window is the ONLY one covering that update.
+        // Name the infobase so the conflict press stays ATTRIBUTABLE in this window: EDT states
+        // it in the dialog message, and only a dialog naming an armed infobase may be answered
+        // with a writing choice.
+        // The project comes from the launch CONFIGURATION, not from req: a caller addressing the
+        // run by launchConfigurationName leaves req.projectName null.
+        ProjectContext launchCtx = ProjectContext.of(configProjectName(matchingConfig));
+        String launchInfobase = LaunchLifecycleUtils.attributionInfobaseName(
+            Activator.getDefault().getApplicationManager(),
+            launchCtx.isOpen() ? launchCtx.project() : null, applicationId);
+        // Armed even without a resolved name: the confirmer degrades such an arm to 'cancel', so
+        // the modal is answered (no hang) but nothing is written on an unattributable dialog.
+        ExternalInfobaseChangesPolicy launchPolicy = armFlags[0] ? req.externalChanges : null;
+        // For a STANDALONE-SERVER application this window is where the DB update actually
+        // happens, so a conflict cancelled here must be reported with its cause - otherwise the run
+        // just fails later with a generic "no junit.xml" and the caller never learns which knob
+        // would have let it through.
+        LaunchUpdateDialogAutoConfirmer.ConflictWatch conflicts = launchPolicy == null
+            ? null
+            : LaunchUpdateDialogAutoConfirmer.beginConflictWatch(launchInfobase);
+        LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
+            launchInfobase);
         ILaunch launch;
         try
         {
             launch = workingCopy.launch(ILaunchManager.RUN_MODE,
                 new NullProgressMonitor());
         }
+        catch (CoreException ex)
+        {
+            // The cancel can also ABORT the launch instead of letting it return: the reason is
+            // still in the window, and it explains the failure far better than the delegate's own
+            // message does.
+            String cancelled = declinedConflict(conflicts, launchPolicy);
+            if (cancelled != null)
+            {
+                throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID, cancelled, ex));
+            }
+            throw ex;
+        }
         finally
         {
-            LaunchUpdateDialogAutoConfirmer.disarm(armFlags[0], armFlags[1]);
+            LaunchUpdateDialogAutoConfirmer.disarm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
+                launchInfobase);
+            // Closed HERE, not after the check below: a launch() that throws must not leave the
+            // window registered in the confirmer for the rest of the session.
+            closeQuietly(conflicts);
+        }
+        String declined = declinedConflict(conflicts, launchPolicy);
+        if (declined != null)
+        {
+            // The client started, but the infobase it needs was never updated - it would run against
+            // the old configuration. Stop it and report the cause instead of polling for a report
+            // that cannot come. NOT registered as owned: that flag protects a launch from being
+            // swept, which is the opposite of what this one needs.
+            terminateQuietly(launch);
+            throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID, declined));
         }
         // Register BEFORE leaving the per-key lock so a concurrent
         // auto-chain on the same IB sees this launch as owned and
@@ -882,7 +1050,8 @@ public class RunYaxunitTestsTool implements IMcpTool
     private String launchDebugMode(ILaunchConfiguration matchingConfig, IProject project, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
             String projectName, String applicationId, IApplicationManager appManager,
             ILaunchManager launchManager, String extensions, String modules, String tests,
-            boolean updateBeforeLaunch, String updateScope) throws IOException, CoreException
+            boolean updateBeforeLaunch, String updateScope, ExternalInfobaseChangesPolicy externalChanges)
+        throws IOException, CoreException
     {
         // Native path separators: YAXUnit builds file:// URIs and breaks on forward slashes on Windows.
         Path reportDir = Paths.get(System.getProperty("java.io.tmpdir"), //$NON-NLS-1$
@@ -903,10 +1072,11 @@ public class RunYaxunitTestsTool implements IMcpTool
         PreLaunchResult preLaunch = null;
         if (updateBeforeLaunch)
         {
-            String prepKey = LaunchLifecycleUtils.prepKeyFor(projectName, applicationId);
+            String prepKey = LaunchLifecycleUtils.prepKeyFor(projectName, applicationId)
+                + "|" + externalChanges.wireValue(); //$NON-NLS-1$
             final PreLaunchResult[] resultHolder = new PreLaunchResult[1];
             PrepRequest prepReq = new PrepRequest(projectName, launchManager, project,
-                applicationId, appManager, updateScope,
+                applicationId, appManager, updateScope, externalChanges,
                 "YAXUnit debug pre-launch preparation for " + projectName); //$NON-NLS-1$
 
             String pendingOrError = awaitPreparedOrPending(prepKey, prepReq, resultHolder);
@@ -971,21 +1141,48 @@ public class RunYaxunitTestsTool implements IMcpTool
             // non-destructive "Keep existing and start new" so an unattended call
             // never hangs on the modal.
             boolean[] armFlags = debugPathArmFlags(updateBeforeLaunch);
-            LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1]);
+            // Same as the RUN path: gated on the update opt-out, and the only armed window
+            // around a standalone-server application's delegate-performed update.
+            String launchInfobase = LaunchLifecycleUtils.attributionInfobaseName(appManager, project,
+                applicationId);
+            ExternalInfobaseChangesPolicy launchPolicy = armFlags[0] ? externalChanges : null;
+            // Same as the RUN path: this is the only armed window around a standalone-server
+            // application's delegate-performed update, so a cancel here is reported with its cause.
+            LaunchUpdateDialogAutoConfirmer.ConflictWatch conflicts = launchPolicy == null
+                ? null
+                : LaunchUpdateDialogAutoConfirmer.beginConflictWatch(launchInfobase);
+            LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
+                launchInfobase);
+            ILaunch[] spawned = new ILaunch[1];
             try
             {
-                ILaunch spawned = workingCopy.launch(ILaunchManager.DEBUG_MODE, new NullProgressMonitor());
-                LaunchLifecycleUtils.registerOwnedLaunch(spawned);
+                spawned[0] = workingCopy.launch(ILaunchManager.DEBUG_MODE, new NullProgressMonitor());
             }
             catch (CoreException ex)
             {
                 Activator.logError("Failed to launch YAXUnit in debug mode", ex); //$NON-NLS-1$
-                return ToolResult.error("Launch failed: " + ex.getMessage()).toJson(); //$NON-NLS-1$
+                // Same as the RUN path: a cancel that aborted the launch is reported with its own
+                // cause, not with the delegate's generic message.
+                String cancelled = declinedConflict(conflicts, launchPolicy);
+                return ToolResult.error(cancelled != null ? cancelled
+                    : "Launch failed: " + ex.getMessage()).toJson(); //$NON-NLS-1$
             }
             finally
             {
-                LaunchUpdateDialogAutoConfirmer.disarm(armFlags[0], armFlags[1]);
+                LaunchUpdateDialogAutoConfirmer.disarm(armFlags[0], armFlags[1], armFlags[0],
+                    launchPolicy, launchInfobase);
+                closeQuietly(conflicts);
             }
+            String declined = declinedConflict(conflicts, launchPolicy);
+            if (declined != null)
+            {
+                // Registered only AFTER this check: the owned flag protects a launch from being
+                // swept, so marking one we are about to refuse would leave it live and protected
+                // if the termination below cannot go through.
+                terminateQuietly(spawned[0]);
+                return ToolResult.error(declined).toJson();
+            }
+            LaunchLifecycleUtils.registerOwnedLaunch(spawned[0]);
         }
         return buildDebugLaunchMarkdown(matchingConfig.getName(), projectName, applicationId,
             reportDir, junitFile, preLaunch);
@@ -1103,11 +1300,12 @@ public class RunYaxunitTestsTool implements IMcpTool
         final String applicationId;
         final IApplicationManager appManager;
         final String updateScope;
+        final ExternalInfobaseChangesPolicy externalChanges;
         final String jobName;
 
-        PrepRequest(String projectName, ILaunchManager launchManager, IProject project,
+        PrepRequest(String projectName, ILaunchManager launchManager, IProject project, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
                 String applicationId, IApplicationManager appManager, String updateScope,
-                String jobName)
+                ExternalInfobaseChangesPolicy externalChanges, String jobName)
         {
             this.projectName = projectName;
             this.launchManager = launchManager;
@@ -1115,6 +1313,7 @@ public class RunYaxunitTestsTool implements IMcpTool
             this.applicationId = applicationId;
             this.appManager = appManager;
             this.updateScope = updateScope;
+            this.externalChanges = externalChanges;
             this.jobName = jobName;
         }
     }
@@ -1220,7 +1419,7 @@ public class RunYaxunitTestsTool implements IMcpTool
                 LaunchLifecycleUtils.getDefaultTerminateTimeoutSeconds();
             PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
                 req.launchManager, req.project, req.applicationId,
-                req.appManager, terminateTimeout, req.updateScope);
+                req.appManager, terminateTimeout, req.updateScope, req.externalChanges);
             jobEntry.phase = "db-update"; //$NON-NLS-1$
             resultHolder[0] = result;
             if (!result.isOk())

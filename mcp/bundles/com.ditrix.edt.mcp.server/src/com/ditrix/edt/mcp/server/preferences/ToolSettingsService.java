@@ -9,6 +9,7 @@ package com.ditrix.edt.mcp.server.preferences;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -39,17 +40,70 @@ public final class ToolSettingsService // NOSONAR intentional singleton (Eclipse
     }
 
     /**
-     * Returns the set of disabled tool names from preferences.
+     * Returns the set of disabled tool names from preferences, falling back to the SHIPPED defaults
+     * when no store is available - never to "nothing is disabled", which would enable a default-off
+     * tool.
      */
     public Set<String> getDisabledTools()
     {
         IPreferenceStore store = getStore();
         if (store == null)
         {
-            return Collections.emptySet();
+            // FAIL CLOSED: with no preference store (a headless registry, a plugin not started yet)
+            // an empty set would advertise and allow EVERY tool, including the ones that ship
+            // disabled - the powerful raw git tool among them. Fall back to the shipped defaults.
+            return parseDisabledTools(PreferenceConstants.DEFAULT_DISABLED_TOOLS);
         }
+        ensureMigrated(store);
         String value = store.getString(PreferenceConstants.PREF_DISABLED_TOOLS);
         return parseDisabledTools(value);
+    }
+
+    /**
+     * Applies the tool-enablement preference MIGRATIONS once per store, lazily on the first read.
+     * <p>
+     * A tool that ships DISABLED by default gets that from {@code DEFAULT_DISABLED_TOOLS} - but only on
+     * a store that never persisted its own value. An installation that had already saved the Tools tab
+     * (or an "all tools" preset) holds an explicit list that predates the new tool, so without this the
+     * powerful {@code git} tool would silently arrive ENABLED on upgrade. Version 1 therefore adds it to
+     * such a stored list; the user can still enable it deliberately afterwards.
+     *
+     * @param store the preference store to migrate (never {@code null} here)
+     */
+    /**
+     * Test seam: runs the migration against a supplied store, so the one mechanism that keeps a
+     * default-off tool disabled on upgrade can be verified without an Eclipse runtime.
+     *
+     * @param store the preference store to migrate
+     */
+    static void ensureMigratedForTest(IPreferenceStore store)
+    {
+        INSTANCE.ensureMigrated(store);
+    }
+
+    private void ensureMigrated(IPreferenceStore store)
+    {
+        if (store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION)
+            >= PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION)
+        {
+            return;
+        }
+        // Only an EXPLICITLY stored list needs fixing; a default-valued store already carries the new
+        // default (which includes the tool).
+        if (store.contains(PreferenceConstants.PREF_DISABLED_TOOLS)
+            && !store.isDefault(PreferenceConstants.PREF_DISABLED_TOOLS))
+        {
+            Set<String> disabled =
+                new LinkedHashSet<>(parseDisabledTools(store.getString(PreferenceConstants.PREF_DISABLED_TOOLS)));
+            // The tool name is used as a literal here on purpose: the preferences layer must not depend
+            // on tools/impl (see the architecture rules).
+            if (disabled.add("git")) //$NON-NLS-1$
+            {
+                store.setValue(PreferenceConstants.PREF_DISABLED_TOOLS, serializeDisabledTools(disabled));
+            }
+        }
+        store.setValue(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION,
+            PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION);
     }
 
     /**

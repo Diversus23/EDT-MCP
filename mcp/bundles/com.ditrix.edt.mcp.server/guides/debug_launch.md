@@ -15,6 +15,7 @@ Use this to bring up a debuggable 1C session before setting breakpoints and step
 - **projectName** (string) — EDT project name; required when launchConfigurationName is absent.
 - **applicationId** (string) — from `get_applications`; required in the projectName+applicationId mode.
 - **updateBeforeLaunch** (boolean, default true) — silently apply the configuration->DB update before launching so the EDT launch delegate finds the infobase already UPDATED and shows no 'Update database?' modal. Ignored for Attach configs (nothing to update). The update analysis is shared with the YAXUnit tools: skip when already UPDATED, wait when BEING_UPDATED, otherwise incremental-update. A config without a persisted application binding (tracked under a synthetic `launch:<configName>` id) skips this programmatic update — there is no resolvable application to update — and relies on the auto-confirmer safeguard alone. As a belt-and-suspenders safeguard, the actual `config.launch(...)` is wrapped in an auto-confirmer that programmatically presses 'Update then run' if the delegate's modal still appears — in either EDT locale (English 'Application update' / Russian 'Обновление приложения'), so an unattended Russian-locale EDT never hangs on it. With `updateBeforeLaunch=false` the update is skipped and the platform may then show that modal. On a **standalone-server** application (`applicationId` starting with `ServerApplication.`) the DB update is performed by EDT's coordinated launch flow instead (auto-confirmed by the same armed confirmer; no dialog at all when the IB is already in sync) — this plugin does NOT pre-update such applications out-of-band: doing so started the standalone server in RUN mode and held a designer-agent connection that wedged the subsequent debug restart. Consequence: for server apps there is no synchronous 'stale IB' refusal — the update happens asynchronously inside the launch, and a failure surfaces via `debug_status` / the EDT log, matching EDT-native behaviour.
+- `externalInfobaseChanges` — how to answer EDT's blocking "Infobase configuration changes" modal when the infobase was changed OUTSIDE EDT (Designer, `ibcmd`, a CLI pipeline) since the last EDT interaction: `override` (default) keeps the project configuration and overwrites the infobase, `import` pulls the external changes into the PROJECT sources, `cancel` aborts the update with an error. See ## Infobase changed outside EDT.
 - **restartIfRunning** (boolean, default false) — controls what happens when a matching CLIENT session is already running. Default (`false`): short-circuit with `alreadyRunning: true` and do NOT relaunch — call `terminate_launch` first if you truly need a fresh session. `true`: non-interactively terminate the existing CLIENT session, wait for it to die (clearing its registry entry), then relaunch — so the EDT launch delegate never raises its blocking 'Debug session already exists' modal. It only ever terminates a live client session, NEVER a debug server: a standalone-server debug session's live threads are typed SERVER (a debug-mode standalone server keeps a live «Сервер» thread), so it is never treated as the duplicate and is left running. Use `restartIfRunning=true` for unattended re-launches after a code change instead of a separate `terminate_launch` + `debug_launch` round-trip.
 
 ## Already-running guard
@@ -35,7 +36,7 @@ If the unlikely preflight→launch race still lets the 1003 modal appear (e.g. a
 ## Notes
 
 - Returns JSON. On a fresh launch: `launchConfiguration`, `configurationType`, `attach`, `mode`, `status: "launching"`, `project`/`applicationId` (when known), and a `message`. The `alreadyRunning: true` short-circuit returns the same identity fields but no `status` (nothing was launched).
-- The launch is ASYNCHRONOUS and non-blocking: the tool schedules `config.launch(DEBUG_MODE, ...)` as a **background EDT Job** (the same shape EDT's own launch UI uses) and returns `status: "launching"` immediately, WITHOUT waiting for the 1C client to finish starting (it may show login / database-update dialogs). Because the launch runs OFF the UI thread, the EDT workbench stays responsive for its whole duration — including a standalone-server mode-switch restart (non-debug→debug), which can take minutes; the job's progress is visible in the EDT **Progress view**. Poll `debug_status` until the session appears running, then use `wait_for_break`. Because the launch runs after the call returns, a launch failure is NOT reported in this response — it is written to the EDT error log (and the job's result status) instead.
+- The launch is ASYNCHRONOUS and non-blocking: the tool schedules `config.launch(DEBUG_MODE, ...)` as a **background EDT Job** (the same shape EDT's own launch UI uses) and returns `status: "launching"` immediately, WITHOUT waiting for the 1C client to finish starting (it may show login / database-update dialogs). Because the launch runs OFF the UI thread, the EDT workbench stays responsive for its whole duration — including a standalone-server mode-switch restart (non-debug→debug), which can take minutes; the job's progress is visible in the EDT **Progress view**. Poll `debug_status` until the session appears running, then use `wait_for_break`. Because the launch runs after the call returns, a launch failure is NOT reported in this response — it is recorded and surfaced by the NEXT `debug_status` call as `recentLaunchFailures` (last hour), besides going to the EDT error log and the job's result status. That covers both an outright launch exception and an external-changes conflict your `externalInfobaseChanges` policy declined to resolve while EDT updated the infobase inside the launch — the standalone-server path, where that update is the launch delegate's job rather than the pre-launch step.
 - On a not-found config the error payload includes `availableConfigurations` (every debug-capable config: runtime client + attach), so you can pick a valid name.
 - The launch goes through a direct `config.launch(DEBUG_MODE, ...)` to avoid modal EDT dialogs that would block the MCP worker thread. While the background job runs, an auto-confirmer (`LaunchUpdateDialogAutoConfirmer`) is armed to dismiss the launch delegate's 'Application update' modal non-interactively; the delegate's dialogs marshal themselves to the EDT UI thread, where the confirmer's filter fires (the modal's own nested event loop dispatches the button press), and because the MCP worker has already returned `status: "launching"`, the server is never blocked on the dialog.
 
@@ -44,3 +45,25 @@ If the unlikely preflight→launch race still lets the 1003 modal appear (e.g. a
 - Attach is reachable ONLY via launchConfigurationName; projectName+applicationId never starts an Attach session.
 - `alreadyRunning: true` is a success, not an error — don't retry it; terminate first if you truly need a fresh session.
 - `updateBeforeLaunch` has no effect on Attach configs.
+
+## Infobase changed outside EDT
+
+When something other than EDT wrote the infobase configuration since the last EDT interaction —
+a `1cv8 DESIGNER /LoadConfigFromFiles`, an `ibcmd infobase config load`, a colleague in the
+Configurator — the configuration-to-infobase update stops and asks what to do with those
+changes in a modal titled **"Infobase configuration changes"** / **"Изменения конфигурации информационной базы"**
+(buttons Import / Override / Cancel). Nobody presses it in an unattended run, so the call would
+block on the UI thread until the tool times out.
+
+`externalInfobaseChanges` answers it for you:
+
+| value | what it writes | when to use |
+|---|---|---|
+| `override` (default) | the INFOBASE — the project configuration wins, the external changes are discarded | the literal meaning of "update the infobase from the project"; the right choice for a CI/agent pipeline that owns the infobase |
+| `import` | the PROJECT sources — the infobase changes are pulled in and merged | you want to keep what was loaded into the infobase; note this rewrites your working tree |
+| `cancel` | nothing | you want the call to fail loudly and resolve the divergence yourself |
+
+The modal's own default button is **Import**, which would rewrite the project sources — so this
+plugin never presses it blind: if the labelled button for the selected policy cannot be found (an
+unshipped locale, a reworded button) the dialog is cancelled and the update reports the failure
+instead of writing anything.

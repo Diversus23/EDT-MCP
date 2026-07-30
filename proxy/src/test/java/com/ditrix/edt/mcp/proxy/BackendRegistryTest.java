@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.proxy;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -21,6 +22,8 @@ import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
+
+import com.google.gson.JsonObject;
 
 /**
  * Unit tests for {@link BackendRegistry}: a real {@link BackendRegistry#refresh()} scan
@@ -228,7 +231,70 @@ public class BackendRegistryTest
         assertEquals(List.of("A"), BackendRegistry.parseProjectNames(raw)); //$NON-NLS-1$
     }
 
+    @Test
+    public void testParseProjectNamesRejectsAFailedPayload()
+    {
+        // A payload that declares failure is not a project list, even with a projects array -
+        // accepting it would register phantom projects for routing.
+        String raw = "{\"result\":{\"structuredContent\":{\"success\":false," //$NON-NLS-1$
+            + "\"projects\":[{\"name\":\"Phantom\"}]}}}"; //$NON-NLS-1$
+        assertTrue(BackendRegistry.parseProjectNames(raw).isEmpty());
+        assertFalse(BackendRegistry.hasStructuredProjects(raw));
+    }
+
+    @Test
+    public void testPlainTextModeStillYieldsTheMachineList()
+    {
+        // Plain-text mode (the Cursor-compatibility preference) delivers the SAME JSON payload as
+        // content text instead of structuredContent - that is still the machine contract, so such a
+        // backend must be supported and routable, not reported as an unsupported plugin version.
+        String payload = "{\"success\":true,\"projects\":[{\"name\":\"Trade\"}]}"; //$NON-NLS-1$
+        String raw = textResult(payload);
+        assertTrue(BackendRegistry.hasStructuredProjects(raw));
+        assertEquals(List.of("Trade"), BackendRegistry.parseProjectNames(raw)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testMarkdownOnlyResponseIsNotAMachineList()
+    {
+        // A genuinely old plugin answers with the human table only - no Markdown scraping, so it
+        // yields nothing and is classified as unsupported by the caller.
+        String md = "| Name | State |\n|---|---|\n| Trade | ready |\n"; //$NON-NLS-1$
+        assertFalse(BackendRegistry.hasStructuredProjects(textResult(md)));
+        assertTrue(BackendRegistry.parseProjectNames(textResult(md)).isEmpty());
+    }
+
+    @Test
+    public void testToolErrorWithStaleProjectsContributesNothing()
+    {
+        // isError:true is checked FIRST, so a failed response that still carries a partial/stale
+        // projects array cannot register those names for routing.
+        String raw = "{\"result\":{\"isError\":true,\"structuredContent\":{\"success\":true," //$NON-NLS-1$
+            + "\"projects\":[{\"name\":\"Stale\"}]}}}"; //$NON-NLS-1$
+        // The response DOES carry a machine list, so only the isError-FIRST ordering keeps those
+        // names out of the routing table (the probe returns no projects for a tool error).
+        assertTrue("the response must be recognised as a tool error", //$NON-NLS-1$
+            BackendRegistry.isToolError(raw));
+        assertTrue("...even though it also carries a projects array", //$NON-NLS-1$
+            BackendRegistry.hasStructuredProjects(raw));
+    }
+
     // ---- helpers ----
+
+    /** A tools/call response whose only content is a plain text block (plain-text mode shape). */
+    private static String textResult(String text)
+    {
+        com.google.gson.JsonObject item = new com.google.gson.JsonObject();
+        item.addProperty("type", "text"); //$NON-NLS-1$ //$NON-NLS-2$
+        item.addProperty("text", text); //$NON-NLS-1$
+        com.google.gson.JsonArray content = new com.google.gson.JsonArray();
+        content.add(item);
+        com.google.gson.JsonObject result = new com.google.gson.JsonObject();
+        result.add("content", content); //$NON-NLS-1$
+        com.google.gson.JsonObject response = new com.google.gson.JsonObject();
+        response.add("result", result); //$NON-NLS-1$
+        return response.toString();
+    }
 
     private static ProxyConfig scanningConfig(int from, int to)
     {
@@ -298,5 +364,49 @@ public class BackendRegistryTest
         {
             // already stopped - nothing to clean up
         }
+    }
+
+    /**
+     * A backend whose machine list the output cap CUT is a size problem, not an old plugin: telling
+     * the operator to upgrade would send them after the wrong thing. Discovery must classify it the
+     * way the fan-out already does.
+     */
+    @Test
+    public void testATruncatedPayloadIsNotReportedAsAnUnsupportedPlugin()
+    {
+        JsonObject result = Json.parseObject("{\"content\":[{\"type\":\"text\",\"text\":" //$NON-NLS-1$
+            + "\"{\\\"success\\\":true,\\\"projects\\\":[{\\\"name\\\":\\\"Pro\\n\\n---\\n" //$NON-NLS-1$
+            + "[OUTPUT TRUNCATED] cut here\"}]}"); //$NON-NLS-1$
+
+        assertTrue("a cut machine payload must be recognised", //$NON-NLS-1$
+            BackendRegistry.hasTruncatedMachineProjects(result));
+
+        JsonObject legacy = Json.parseObject("{\"content\":[{\"type\":\"text\",\"text\":" //$NON-NLS-1$
+            + "\"| Project |\\n|---|\\n| Legacy |\"}]}"); //$NON-NLS-1$
+        assertFalse("an old plugin's markdown table is NOT a truncation", //$NON-NLS-1$
+            BackendRegistry.hasTruncatedMachineProjects(legacy));
+    }
+
+    /**
+     * In a mixed-version fleet the lowest port may run an old plugin; publishing ITS tools/list would
+     * advertise a list_projects without the 'format' parameter and hide the machine contract.
+     */
+    @Test
+    public void testToolsListDonorSkipsAnUnsupportedBackend()
+    {
+        BackendRegistry registry = new BackendRegistry(ProxyConfig.parse(new String[0], Map.of()));
+        Backend old = new Backend(8765, java.net.http.HttpClient.newHttpClient(), 5);
+        Backend current = new Backend(8766, java.net.http.HttpClient.newHttpClient(), 5);
+        registry.installStateForTest(List.of(old, current), Map.of(), List.of(8765));
+
+        assertEquals("the donor must be the supported backend", //$NON-NLS-1$
+            8766, registry.toolsListDonor().getPort());
+
+        // With no supported backend at all, the lowest port still has to serve something.
+        registry.installStateForTest(List.of(old), Map.of(), List.of(8765));
+        assertEquals(8765, registry.toolsListDonor().getPort());
+
+        registry.installStateForTest(List.of(), Map.of(), List.of());
+        assertNull("no live backend means no donor", registry.toolsListDonor()); //$NON-NLS-1$
     }
 }

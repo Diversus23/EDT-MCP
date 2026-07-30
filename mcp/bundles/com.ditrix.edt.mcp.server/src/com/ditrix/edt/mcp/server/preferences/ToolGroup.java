@@ -65,7 +65,23 @@ public enum ToolGroup
     TRANSLATION("translation", "Translation (LanguageTool)", //$NON-NLS-1$ //$NON-NLS-2$
         "LanguageTool: translation strings generation, configuration sync, project info", //$NON-NLS-1$
         "generate_translation_strings", "translate_configuration", //$NON-NLS-1$ //$NON-NLS-2$
-        "get_translation_project_info"); //$NON-NLS-1$
+        "get_translation_project_info"), //$NON-NLS-1$
+
+    /**
+     * Git tools. The {@code git} command tool ships DISABLED by default, and this tree is the UI its
+     * description points at - so it MUST appear here, otherwise there is no way to enable it from the
+     * Tools tab. The branch tools - including {@code set_branch_infobase}, which MUTATES the
+     * branch-to-infobase binding - are listed alongside it so the whole Git surface is manageable in
+     * one place: a group that omitted one would leave it enabled after the operator disabled the
+     * group (and after a disable-all, which iterates the groups). Membership does not change what
+     * ships enabled - only {@code git} is disabled by default - but it does put the branch tools
+     * under this group's toggle, which is the point.
+     */
+    GIT("git", "Git", //$NON-NLS-1$ //$NON-NLS-2$
+        "Git operations: the 'git' command tool (disabled by default), branch listing/switching" //$NON-NLS-1$
+            + " and the branch-to-infobase binding", //$NON-NLS-1$
+        "git", "list_git_branches", "switch_git_branch", "create_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "set_branch_infobase"); //$NON-NLS-1$
 
     private final String id;
     private final String displayName;
