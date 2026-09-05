@@ -16,6 +16,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
+import com.ditrix.edt.mcp.server.UserSignal;
+import com.ditrix.edt.mcp.server.UserSignal.SignalType;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
@@ -48,6 +50,82 @@ public class McpProtocolHandlerTest
     public void tearDown()
     {
         registry.clear();
+    }
+
+    @Test
+    public void testJsonUserSignalMessageIsTruncatedToTheBound()
+    {
+        String message = "x".repeat(McpProtocolHandler.MAX_USER_SIGNAL_MESSAGE_CHARS + 100); //$NON-NLS-1$
+
+        JsonObject augmented = JsonParser.parseString(handler.addUserSignalToJson("{\"value\":1}", //$NON-NLS-1$
+            new UserSignal(SignalType.CUSTOM, message))).getAsJsonObject();
+        String retained = augmented.getAsJsonObject("userSignal").get("message").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+
+        assertEquals(McpProtocolHandler.MAX_USER_SIGNAL_MESSAGE_CHARS, retained.length());
+        assertTrue(retained, retained.endsWith("\u2026")); //$NON-NLS-1$
+        assertEquals(message.substring(0, McpProtocolHandler.MAX_USER_SIGNAL_MESSAGE_CHARS - 1)
+            + "\u2026", retained); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testMarkdownUserSignalIsBoundedByTheReservedAugmentation()
+    {
+        String markdown = "page"; //$NON-NLS-1$
+        String augmented = McpProtocolHandler.addUserSignalToMarkdown(markdown,
+            new UserSignal(SignalType.CUSTOM,
+                "x".repeat(McpProtocolHandler.MAX_USER_SIGNAL_MESSAGE_CHARS + 100))); //$NON-NLS-1$
+
+        assertEquals(markdown.length()
+            + McpProtocolHandler.MAX_MARKDOWN_USER_SIGNAL_AUGMENTATION_CHARS,
+            augmented.length());
+        assertTrue(augmented, augmented.endsWith("\u2026")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testJsonUserSignalTruncationNeverSplitsSurrogatePair()
+    {
+        String message = "x".repeat(McpProtocolHandler.MAX_USER_SIGNAL_MESSAGE_CHARS - 2) //$NON-NLS-1$
+            + "\uD83D\uDE00tail"; //$NON-NLS-1$
+
+        JsonObject augmented = JsonParser.parseString(handler.addUserSignalToJson("{\"value\":1}", //$NON-NLS-1$
+            new UserSignal(SignalType.CUSTOM, message))).getAsJsonObject();
+        String retained = augmented.getAsJsonObject("userSignal").get("message").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+
+        assertEquals("x".repeat(McpProtocolHandler.MAX_USER_SIGNAL_MESSAGE_CHARS - 2) //$NON-NLS-1$
+            + "\u2026", retained); //$NON-NLS-1$
+        assertFalse(Character.isHighSurrogate(retained.charAt(retained.length() - 2)));
+        assertFalse(Character.isLowSurrogate(retained.charAt(retained.length() - 2)));
+    }
+
+    @Test
+    public void testJsonUserSignalPreservesRawHtmlSensitiveCharacters()
+    {
+        String original = "{\"xml\":\"<root>A&B</root>\",\"comparison\":\"x > y\"}"; //$NON-NLS-1$
+
+        String augmented = handler.addUserSignalToJson(original,
+            new UserSignal(SignalType.CUSTOM, "continue")); //$NON-NLS-1$
+
+        assertTrue(augmented, augmented.contains("<root>A&B</root>")); //$NON-NLS-1$
+        assertTrue(augmented, augmented.contains("x > y")); //$NON-NLS-1$
+        assertFalse(augmented, augmented.contains("\\u003c")); //$NON-NLS-1$
+        assertFalse(augmented, augmented.contains("\\u003e")); //$NON-NLS-1$
+        assertFalse(augmented, augmented.contains("\\u0026")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testJsonUserSignalChangesNoExistingParsedMembers()
+    {
+        String original = "{\"success\":true,\"xml\":\"<root>A&B</root>\"," //$NON-NLS-1$
+            + "\"nested\":{\"items\":[1,2,3]}}"; //$NON-NLS-1$
+        JsonObject expected = JsonParser.parseString(original).getAsJsonObject();
+
+        JsonObject augmented = JsonParser.parseString(handler.addUserSignalToJson(original,
+            new UserSignal(SignalType.BACKGROUND, "still running"))).getAsJsonObject(); //$NON-NLS-1$
+        JsonObject signal = augmented.remove("userSignal").getAsJsonObject(); //$NON-NLS-1$
+
+        assertEquals(expected, augmented);
+        assertEquals("BACKGROUND", signal.get("type").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("still running", signal.get("message").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     // === Initialize ===
@@ -720,6 +798,32 @@ public class McpProtocolHandlerTest
         assertNotNull("Should return error for null tool name", json.get("error"));
     }
 
+    /**
+     * An argument sent as JSON {@code null} does not reach the tool as an empty value - it does not
+     * reach it as a key at all.
+     * <p>
+     * Nothing asserted this until here, and a tool stands on it: {@code compare_configurations}
+     * decides between "release a comparison" and "start one" from whether
+     * {@code releaseComparisonId} is a KEY in the map this handler builds, so the map's treatment of
+     * an explicit null is what answers {@code releaseComparisonId: null}. It reads as an omission
+     * and starts a comparison, which is the intended reading of a null optional argument - but only
+     * for as long as this stays true, and it is not the tool's own code that keeps it true.
+     */
+    @Test
+    public void testAnArgumentSentAsJsonNullReachesTheToolAsNoKeyAtAll()
+    {
+        RecordingTool tool = new RecordingTool("recording_tool");
+        registry.register(tool);
+
+        handler.processRequest(buildToolCallRequest(1, "recording_tool",
+            "{\"kept\":\"x\",\"dropped\":null}"));
+
+        assertNotNull("the tool must have been called", tool.params);
+        assertTrue("a key sent with a value reaches the tool", tool.params.containsKey("kept"));
+        assertFalse("a key sent as JSON null must not reach the tool at all",
+            tool.params.containsKey("dropped"));
+    }
+
     @Test
     public void testToolCallErrorPayloadFlagsIsError()
     {
@@ -1257,6 +1361,34 @@ public class McpProtocolHandlerTest
 
         @Override
         public String execute(Map<String, String> params) { return "{}"; }
+    }
+
+    /** IMcpTool stub that keeps the parameter map it was handed, so the map itself can be asserted. */
+    private static class RecordingTool implements IMcpTool
+    {
+        private final String name;
+        private Map<String, String> params;
+
+        RecordingTool(String name)
+        {
+            this.name = name;
+        }
+
+        @Override
+        public String getName() { return name; }
+
+        @Override
+        public String getDescription() { return "records the params it receives"; }
+
+        @Override
+        public String getInputSchema() { return "{\"type\":\"object\"}"; }
+
+        @Override
+        public String execute(Map<String, String> params)
+        {
+            this.params = params;
+            return "{}";
+        }
     }
 
     /**

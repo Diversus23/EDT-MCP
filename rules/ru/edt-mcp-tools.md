@@ -1,8 +1,10 @@
 # Карта инструментов MCP-сервера EDT-MCP
 
-> Источник истины — раздел «Available Tools» в `README.md` репозитория EDT-MCP. Если расходится с этим файлом — верь README.
+> Источник истины — актуальная MCP-справка/схема и сгенерированный каталог
+> `docs/tools/`. Эта скопированная карта задач вторична.
 >
-> Всего инструментов: **57**, разбиты на 9 групп.
+> Этот файл — выборочная карта задач, а не полный индекс возможностей; в нём
+> намеренно нет поддерживаемого вручную общего числа, которое снова устареет.
 
 ## Префиксы имён в разных клиентах
 
@@ -35,8 +37,8 @@ MCP-клиенты именуют инструменты по-разному. Р
 | «Проверь запрос 1С» | `validate_query` (для СКД — `dcsMode: true`) | Перед вставкой текста запроса в код |
 | «Что в этой форме?» | `get_form_layout_snapshot` с `mode: compact` (YAML); `get_form_screenshot` если нужен визуал | YAML дешевле PNG |
 | «Что показывает платформа для типа X?» | `get_platform_documentation` | Не угадывай сигнатуры |
-| «Запусти / отладь / обнови ИБ» | `list_configurations` → `debug_launch` / `update_database` | Сперва узнай имя launch-конфигурации |
-| «Прогон тестов» | `run_yaxunit_tests`; для отладки падающих — `debug_yaxunit_tests` + `set_breakpoint` | |
+| «Запусти / отладь / обнови ИБ» | `list_configurations` → `launch` / `update_database` | Сперва узнай имя launch-конфигурации |
+| «Прогон тестов» | `run_yaxunit_tests`; для отладки падающих — `set_breakpoint`, затем `run_yaxunit_tests(debug=true)` | |
 | «Что значит ошибка с checkId Z?» | `get_check_description` | |
 
 Если инструмент возвращает `tool is disabled` — текущий пресет (см. ниже) его скрывает. **Не пытайся обходить**, сообщи пользователю и предложи переключить пресет.
@@ -47,10 +49,10 @@ MCP-клиенты именуют инструменты по-разному. Р
 
 | Пресет | Что выключено |
 |---|---|
-| **All Tools** | Ничего (все 57 инструментов) |
+| **All Tools** | Ничего (все включённые на данный момент инструменты) |
 | **Analysis Only** | Группы Applications & Testing, Debugging, BSL Code, Refactoring, Translation + `export_configuration_to_xml` + `import_configuration_from_xml`. Доступны: Core/Project (кроме export/import), Errors & Problems, Code Intelligence, Tags |
 | **Code Review** | То же, что Analysis Only, **минус** добавляются доступными все инструменты BSL Code **кроме** `write_module_source`. То есть доступны `read_method_source`, `read_module_source`, `get_module_structure`, `list_modules`, `search_in_code`, `get_method_call_hierarchy`, `go_to_definition`, `get_symbol_info`, `get_form_layout_snapshot`, `get_form_screenshot`, `validate_query` |
-| **Development** | Только группа Debugging (включая `debug_yaxunit_tests`, `start_profiling`, `get_profiling_results`). Refactoring, Translation, BSL Code, Applications — доступны |
+| **Development** | Группа Debugging и инструменты, выключенные по умолчанию (сейчас raw `git` и `ask_workmate`). `run_yaxunit_tests` остаётся доступен через Applications для обычных прогонов; `debug=true` может запуститься, но инструменты исследования и очистки выключены, поэтому не начинай debug-прогон, пока Debugging не включён. Refactoring, Translation, BSL Code и остальные инструменты Applications — доступны |
 
 ## Настраиваемые дефолты параметров
 
@@ -85,7 +87,7 @@ MCP-клиенты именуют инструменты по-разному. Р
 | Инструмент | Назначение | Когда использовать |
 |---|---|---|
 | `get_problem_summary` | Сводка по числу проблем по проектам и severity | **Первым** — даёт картину одним вызовом |
-| `get_project_errors` | Детальные ошибки. Фильтры: `projectName`, `severity` (ERRORS/BLOCKER/CRITICAL/MAJOR/MINOR/TRIVIAL), `checkId` (подстрока), `objects` (массив FQN), `limit` (default 100, max 1000) | После сводки — для целевого изучения |
+| `get_project_errors` | Детальные ошибки. Фильтры: `projectName`, `severity` (ERRORS/BLOCKER/CRITICAL/MAJOR/MINOR/TRIVIAL), `checkId` (подстрока), `objects` (массив FQN-фрагментов, неточный) ЛИБО `objectFqns` (точные адреса, возвращает `objectsNotFound` / `objectsUnsupported`; взаимоисключаются с `objects`), `limit` (default 100, max 1000) | После сводки — для целевого изучения |
 | `get_markers` | Маркеры workspace — закладки и/или TODO/FIXME-маркеры. Фильтры: `markerKind` (`bookmark`/`task`; без него — оба), `projectName`, `filePath`, `priority` (только для задач) | По запросу или при аудите технического долга |
 
 ### 3. Code Intelligence — навигация и подсказки (7)
@@ -93,7 +95,7 @@ MCP-клиенты именуют инструменты по-разному. Р
 | Инструмент | Назначение | Когда использовать |
 |---|---|---|
 | `get_content_assist` | Подсказки в точке кода (типы, методы) | При работе в конкретной позиции BSL |
-| `get_platform_documentation` | Документация платформы (типы, методы, свойства, конструкторы) | При сомнениях в сигнатуре платформы 1С |
+| `get_platform_documentation` | Документация платформы (типы, методы, свойства, конструкторы). Типовое множество метаданных (`CatalogObject`/`СправочникОбъект`, `CatalogRef`, `DocumentObject`, `EnumRef`, ...) даёт API, общий для всех справочников / документов / регистров | При сомнениях в сигнатуре платформы 1С |
 | `get_metadata_objects` | Список объектов конфигурации с фильтрами `metadataType`, `nameFilter`, `limit` (default 100, max 1000), `language` | Обзор объектов; **всегда** с фильтром |
 | `get_metadata_details` | Детальные свойства объектов по массиву FQN (`objectFqns: [...]`); FQN могут адресовать члены (`Catalog.Products.Attribute.Weight`). С `assignable: true` возвращает схему **назначаемых** свойств (вид значения, текущее значение, допустимые литералы перечисления) — то, что умеет ставить `modify_metadata` | После того как нашёл нужные объекты; перед `modify_metadata` — с `assignable: true` |
 | `list_subsystems` | Дерево подсистем (плоская таблица, рекурсивно по умолчанию) | Знакомство со структурой конфигурации |
@@ -112,12 +114,12 @@ MCP-клиенты именуют инструменты по-разному. Р
 | Инструмент | Назначение | Когда использовать |
 |---|---|---|
 | `get_applications` | Список информационных баз проекта со статусом обновления | Для отладки/обновления |
-| `list_configurations` | Launch-конфигурации (runtime-client + Attach) с текущим running/suspended | Перед `debug_launch` |
+| `list_configurations` | Launch-конфигурации (runtime-client + Attach) с текущим running/suspended | Перед `launch` |
 | `update_database` | Обновление ИБ. Идентификация двумя способами: `launchConfigurationName` **или** `projectName + applicationId`. Режим full/incremental | По запросу |
-| `debug_launch` | Запуск в режиме отладки. Аналогично: `launchConfigurationName` (включая Attach to 1C:Enterprise Debug Server) **или** `projectName + applicationId` | По запросу |
+| `launch` | Запуск в режиме debug (по умолчанию) или run. Аналогично: `launchConfigurationName` (включая debug-only Attach) **или** `projectName + applicationId` | По запросу |
 | `run_yaxunit_tests` | Запуск тестов YAxUnit, парсинг JUnit XML, Markdown-отчёт | После правок, если в проекте есть тесты |
 
-### 6. Debugging — отладчик (12)
+### 6. Debugging — отладчик (13 неустаревших инструментов)
 
 | Инструмент | Назначение |
 |---|---|
@@ -126,12 +128,13 @@ MCP-клиенты именуют инструменты по-разному. Р
 | `list_breakpoints` | Список активных, опционально с фильтром по проекту |
 | `wait_for_break` | Блокирующее ожидание suspend (например, попадание в брейкпойнт) |
 | `get_variables` | Прочитать переменные стек-фрейма (lazy expand для вложенных) |
+| `set_variable` | Изменить переменную в приостановленном stack frame при явном разрешении |
 | `step` | Step over/into/out, возвращает новый снимок |
 | `resume` | Снять с паузы поток или все потоки таргета |
 | `evaluate_expression` | Выполнить BSL-выражение в контексте кадра |
-| `debug_yaxunit_tests` | Запуск YAxUnit-тестов в DEBUG-режиме, чтобы срабатывали брейкпойнты |
 | `debug_status` | Статус активных отладочных запусков: mode, suspend, потоки, top frame |
-| `start_profiling` | Toggle замера производительности на активном debug target |
+| `start_profiling` | Начало замера производительности на активном debug target; завершать через `stop_profiling` |
+| `stop_profiling` | Завершить профилирование выбранного активного debug target |
 | `get_profiling_results` | Результаты замера: per-module / per-line, счётчики вызовов, тайминги, покрытие |
 
 Типовой цикл — см. `edt-mcp-workflows.md`, раздел «Отладка».
@@ -157,7 +160,7 @@ MCP-клиенты именуют инструменты по-разному. Р
 
 | Инструмент | Назначение | Когда использовать |
 |---|---|---|
-| `rename_metadata_object` | Переименование с каскадным обновлением (BSL-код, формы, метаданные). Workflow: 1) вызов без `confirm` — preview всех change points с индексами; 2) (опционально) `disableIndices: "2,3,5"` для пропуска отдельных изменений; 3) `confirm: true`. Параметр `maxResults` (default 20, 0 = без лимита) ограничивает preview. Поддерживает русские FQN. **Единственный** инструмент переименования — `modify_metadata` имя не меняет | **Только** так переименовывать; ручная правка XML опасна |
+| `rename_metadata_object` | Переименование объекта, члена **или** элемента управляемой формы (`Catalog.X.Form.F.Field.Price`, `CommonForm.F.Group.Main`) с каскадным обновлением (BSL-код, формы, метаданные; для элемента формы область — эта форма, строковые литералы не переписываются). Workflow: 1) вызов без `confirm` — preview всех change points с индексами; 2) (опционально) `disableIndices: "2,3,5"` для пропуска отдельных изменений; 3) `confirm: true`. Параметр `maxResults` (default 20, 0 = без лимита) ограничивает preview. Поддерживает русские FQN. **Единственный** инструмент переименования — `modify_metadata` имя не меняет | **Только** так переименовывать; ручная правка XML опасна |
 | `delete_metadata` | Удаление объекта **или** члена по FQN с каскадной очисткой ссылок в BSL/формах/других метаданных. Параметры: `projectName`, `fqn`, опц. `confirm`. Две фазы: вызов без `confirm` — preview затронутых ссылок; `confirm: true` — применение | **Только** так удалять; ручная правка XML опасна |
 | `create_metadata` | Создать узел метаданных по 1C full-name FQN: объект верхнего уровня (`Catalog.Products` / `Справочник.Товары`) **или** подчинённый член (`Catalog.Products.Attribute.Weight`, `InformationRegister.Prices.Dimension.Product`, `Document.Order.TabularSection.Goods`, `Enum.Colors.EnumValue.Red`). Вид выводится из FQN; токены типа и вида допускаются на русском и английском. Параметры: `projectName`, `fqn`, опц. `properties` (массив `{name, value, language?}`), опц. `expectedNotExists`. При создании в `properties` принимаются **только** `synonym` и `comment` — остальные свойства задаёт `modify_metadata`. Дубликаты отклоняются. Поддерживаемые типы верхнего уровня: `Catalog`, `Document`, `InformationRegister`, `AccumulationRegister`, `Enum`, `CommonModule`, `Report`, `DataProcessor`. Пока поддерживается один уровень вложенности члена (поле табличной части пока отклоняется) | Вместо ручной сборки нового `.mdo`; после — прогнать `get_project_errors` |
 | `modify_metadata` | Установить свойства объекта **или** члена по FQN. Параметры: `projectName`, `fqn`, `properties` (массив `{name, value, language?}`). Каждое свойство валидируется: должно быть назначаемым (иначе ошибка перечисляет назначаемые и указывает на `get_metadata_details(assignable: true)`), значение перечисления — одним из допустимых литералов. Умеет `synonym` (по коду языка), `comment` и `type` (структурная спецификация). Для переименования — `rename_metadata_object` (свойство `name` отклоняется) | Задать тип реквизита, синоним и прочие назначаемые свойства без ручной правки `.mdo` |

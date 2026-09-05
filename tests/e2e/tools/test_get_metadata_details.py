@@ -317,21 +317,127 @@ def test_assignable_on_form_group_lists_extinfo_layout_props():
     # pure-read nature of the assignable view is covered by the mdclass assignable read tests.)
 
 
+@e2e_test(tool="get_metadata_details", kind="write-metadata")
+def test_assignable_on_a_form_member_addressed_with_a_foreign_kind_is_refused():
+    # Issue #343: the kind segment is part of the address. Reading '...Button.<a group>' used to
+    # render the GROUP's schema under a Button heading; it must now fail, and the failure must name
+    # the kind the element really has instead of implying it does not exist.
+    grp = "GMDKindGrp"
+    r0 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group." + grp})
+    assert_ok(r0, "seed form group " + grp)
+    wait_for_project_ready()
+
+    for kind in ("Button", "Field", "Grroup"):
+        r = call("get_metadata_details", {
+            "projectName": PROJECT,
+            "objectFqns": ["Catalog.Catalog.Form.ItemForm.%s.%s" % (kind, grp)],
+            "assignable": True,
+        })
+        # A per-object miss is NOT a whole-call failure: the tool must still answer OK and report
+        # the miss in its Errors table (asserting only on r.text would pass on an MCP-level error).
+        assert_ok(r, "assignable read addressed with the foreign kind '%s'" % kind)
+        assert_not_contains(r.text, "the element does not exist",
+            "the reason must not claim nonexistence about an element that exists (kind '%s')" % kind)
+        assert_contains(r.text, "it is a Group",
+            "the failure for kind '%s' must name the kind the element really has" % kind)
+        assert_contains(r.text, "Catalog.Catalog.Form.ItemForm.Group." + grp,
+            "the failure for kind '%s' must spell the corrected address" % kind)
+        assert_not_contains(r.text, "Assignable properties",
+            "a wrongly-addressed member must not render a schema (kind '%s')" % kind)
+
+    # The element's OWN kind still renders.
+    r = call("get_metadata_details", {
+        "projectName": PROJECT,
+        "objectFqns": ["Catalog.Catalog.Form.ItemForm.Group." + grp],
+        "assignable": True,
+    })
+    assert_ok(r, "assignable schema by the element's own kind")
+    assert_contains(r.text, "Assignable properties",
+        "the correctly-addressed member must still render its schema")
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_form_member_fqn_in_the_default_view_never_renders_the_owner():
+    # The DEFAULT view (assignable omitted) resolved the object from the first two FQN segments only,
+    # so a form-member address rendered the OWNING catalog's details - a confident answer about
+    # something else, with the kind segment never examined at all. Issue #343 requires a foreign kind
+    # to be refused on get_metadata_details; that was only true on the assignable path.
+    for fqn in ("Catalog.Catalog.Form.ItemForm.Button.Description",   # foreign kind
+                "Catalog.Catalog.Form.ItemForm.Fielld.Description",   # misspelt kind
+                "Catalog.Catalog.Form.ItemForm.Field.Description"):   # even the RIGHT kind
+        r = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn]})
+        assert_ok(r, "a form-member FQN in the default view: " + fqn)
+        assert_contains(r.text, "## Errors",
+            "a form-member FQN must be reported, not silently answered for its owner: " + fqn)
+        assert_contains(r.text, "assignable=true",
+            "the reason must point at the view that does render a member: " + fqn)
+        # '**Origin:**' is emitted only when an OBJECT's details were actually rendered.
+        assert_not_contains(r.text, "**Origin:**",
+            "the owning object's details must not be rendered for a member FQN: " + fqn)
+
+    # A HANDLER address is not renderable by either view, so it must NOT be told to retry with
+    # assignable=true - an actionable message has to point somewhere that works.
+    h = call("get_metadata_details", {
+        "projectName": PROJECT,
+        "objectFqns": ["Catalog.Catalog.Form.ItemForm.Field.Description.Handler.OnChange"]})
+    assert_ok(h, "a form-handler FQN in the default view")
+    assert_contains(h.text, "## Errors", "a handler FQN must be reported, not answered for the owner")
+    assert_not_contains(h.text, "assignable=true",
+        "the assignable view never renders handlers - it must not be recommended for one")
+
+    # ... and the advice the MEMBER case gives must be true: assignable=true really does render it.
+    ok = call("get_metadata_details", {
+        "projectName": PROJECT,
+        "objectFqns": ["Catalog.Catalog.Form.ItemForm.Field.Description"], "assignable": True})
+    assert_ok(ok, "the recommended view must render the member")
+    assert_contains(ok.text, "Assignable properties",
+        "the reason recommends assignable=true - it must actually render the member there")
+    assert_no_diff("a read must not touch the project on disk")
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_assignable_reaches_a_designer_child_by_its_inherited_kind_only():
+    # The other half of issue #343: the designer's own children carry no kind token of their own,
+    # but a token addresses its EClass AND its subclasses - an AutoCommandBar IS a Group. So the
+    # form-root command bar keeps exactly ONE supported address, and a foreign token is refused
+    # ("no token denotes it" must not degrade into "every token fits").
+    r = call("get_metadata_details", {
+        "projectName": PROJECT,
+        "objectFqns": ["Catalog.Catalog.Form.ItemForm.Group.FormCommandBar"],
+        "assignable": True,
+    })
+    assert_ok(r, "assignable schema for the auto command bar via its inherited kind 'Group'")
+    assert_contains(r.text, "Assignable properties",
+        "the auto command bar must stay readable via 'Group'")
+
+    for kind in ("Field", "Button", "Decoration", "Table", "Grroup"):
+        r = call("get_metadata_details", {
+            "projectName": PROJECT,
+            "objectFqns": ["Catalog.Catalog.Form.ItemForm.%s.FormCommandBar" % kind],
+            "assignable": True,
+        })
+        assert_ok(r, "assignable read of the command bar via the foreign kind '%s'" % kind)
+        assert_not_contains(r.text, "Assignable properties",
+            "a designer child must not answer to the foreign kind '%s'" % kind)
+    assert_no_diff("an assignable read must not touch the project on disk")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # TEMPLATE Data Composition Schema (СКД) structure — a template FQN whose content is a
 # DataCompositionSchema renders the schema's STRUCTURE (issue #267): data sources, data sets
 # (with the FULL query text in a fenced block + a fields table), calculated fields, parameters,
-# and (skipped here — the write side has no way to author them yet) the default settings variant.
+# and (not needed by this scenario) the default settings variant.
 # A template whose content is NOT a DataCompositionSchema (a SpreadsheetDocument print form) is
 # UNCHANGED: it still renders the generic object's basic info, never the DCS structure.
 # ──────────────────────────────────────────────────────────────────────────────
 
 @e2e_test(tool="get_metadata_details", kind="write-metadata")
 def test_dcs_template_fqn_renders_schema_structure():
-    # Seed a fresh Report (the fixture ships none) and author its Data Composition Schema via
-    # modify_metadata's `dcs` payload (#241/#267) — a query data set with an explicit query text +
-    # field, a calculated field, and an untyped parameter. The FIRST `dcs` write find-or-creates the
-    # report's main DCS template under the platform-default name (ОсновнаяСхемаКомпоновкиДанных).
+    # Seed a fresh Report (the fixture ships none) and author its Data Composition Schema via the
+    # dedicated `dcs` tool — a query data set with an explicit query text + field, a calculated
+    # field, and an untyped parameter. The first write find-or-creates the report's main DCS
+    # template under the platform-default name (ОсновнаяСхемаКомпоновкиДанных).
     report = "GMDDcsReport"
     fqn = "Report." + report
     r0 = call("create_metadata", {"projectName": PROJECT, "fqn": fqn})
@@ -345,9 +451,12 @@ def test_dcs_template_fqn_renders_schema_structure():
     calc_expr = "GMDDcsRevenue - GMDDcsCost"           # calculated field expression
     parameter = "GMDDcsParam"                          # schema parameter name
 
-    r1 = call("modify_metadata", {
-        "projectName": PROJECT, "fqn": fqn,
-        "dcs": {
+    r1 = call("dcs", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "action": "upsert",
+        "type": "schema",
+        "body": {
             "dataSets": [{
                 "name": "DataSet1",
                 "type": "query",
@@ -363,7 +472,7 @@ def test_dcs_template_fqn_renders_schema_structure():
     wait_for_project_ready()
 
     # The Cyrillic default DCS template name the platform pre-fills for a report's main schema
-    # (matches ModifyMetadataTool.DEFAULT_DCS_TEMPLATE_NAME / EDT's own designer).
+    # (matches EDT's own designer default).
     template_name = "ОсновнаяСхема" \
         "КомпоновкиДанных"
     template_fqn = fqn + ".Template." + template_name

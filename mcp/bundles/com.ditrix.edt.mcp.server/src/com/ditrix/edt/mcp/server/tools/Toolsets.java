@@ -42,7 +42,7 @@ public final class Toolsets
     public static final String CODE = "code"; //$NON-NLS-1$
     /** Runtime debugging: launches, breakpoints, suspended-state inspection. */
     public static final String DEBUG = "debug"; //$NON-NLS-1$
-    /** YAXUnit unit testing (run / debug). */
+    /** YAXUnit unit testing and 1C:Workmate assistance. */
     public static final String TESTING = "testing"; //$NON-NLS-1$
     /** Performance profiling (start / stop / results). */
     public static final String PROFILING = "profiling"; //$NON-NLS-1$
@@ -54,6 +54,8 @@ public final class Toolsets
     public static final String TRANSLATION = "translation"; //$NON-NLS-1$
     /** Project operations: build/validate/update DB, export/import, problems. */
     public static final String PROJECT = "project"; //$NON-NLS-1$
+    /** Reading a three-way configuration comparison and its merge-rules file. */
+    public static final String COMPARISON = "comparison"; //$NON-NLS-1$
 
     /** Raw git command tool (its own group; disabled by default via PreferenceConstants). */
     public static final String GIT = "git"; //$NON-NLS-1$
@@ -106,7 +108,7 @@ public final class Toolsets
         define(DEBUG, "Debug",
             "Runtime debugging: launch/attach, breakpoints, step/resume, variables, expression evaluation."); //$NON-NLS-1$
         define(TESTING, "Testing",
-            "YAXUnit unit testing: run and debug test suites."); //$NON-NLS-1$
+            "YAXUnit unit testing, 1C:Workmate assistance, and shared background-job polling."); //$NON-NLS-1$
         define(PROFILING, "Profiling",
             "Performance profiling: start/stop a measurement and read the results."); //$NON-NLS-1$
         define(FORMS, "Forms",
@@ -117,6 +119,11 @@ public final class Toolsets
             "Configuration translation via LanguageTool: extract, translate, project info."); //$NON-NLS-1$
         define(PROJECT, "Project",
             "Project operations: clean/revalidate, update DB, export/import XML, problems and markers, docs."); //$NON-NLS-1$
+        define(COMPARISON, "Comparison",
+            "Read a three-way configuration comparison: start one against two git revisions, " //$NON-NLS-1$
+                + "expand a node's differences, and read or author the merge-rules file EDT " //$NON-NLS-1$
+                + "re-applies. Nothing is ever merged - running a merge stays a human action " //$NON-NLS-1$
+                + "in EDT's comparison window."); //$NON-NLS-1$
         define(GIT, "Git",
             "Run raw git commands (status/diff/commit/push/pull/...) in a project's repository via the " //$NON-NLS-1$
             + "'git' tool. Powerful (it can push, checkout, stash); DISABLED by default - check it in the " //$NON-NLS-1$
@@ -130,7 +137,7 @@ public final class Toolsets
             "get_metadata_objects", "get_metadata_details"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(METADATA,
-            "create_metadata", "modify_metadata", "delete_metadata", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "create_metadata", "modify_metadata", "delete_metadata", "dcs", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "rename_metadata_object", "adopt_metadata_object", //$NON-NLS-1$ //$NON-NLS-2$
             "list_common_pictures", "export_common_picture", //$NON-NLS-1$ //$NON-NLS-2$
             "get_subsystem_content", "list_subsystems", //$NON-NLS-1$ //$NON-NLS-2$
@@ -143,12 +150,13 @@ public final class Toolsets
             "get_content_assist", "validate_query"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(DEBUG,
-            "debug_launch", "debug_status", "set_breakpoint", "remove_breakpoint", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "launch", "debug_status", "set_breakpoint", "remove_breakpoint", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "list_breakpoints", "wait_for_break", "get_variables", "set_variable", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "step", "resume", "evaluate_expression", "get_applications", "terminate_launch"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
 
         assign(TESTING,
-            "run_yaxunit_tests", "debug_yaxunit_tests"); //$NON-NLS-1$ //$NON-NLS-2$
+            "run_yaxunit_tests", "debug_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "get_job_status", "cancel_job"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(PROFILING,
             "start_profiling", "stop_profiling", "get_profiling_results"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -170,7 +178,10 @@ public final class Toolsets
             "get_event_log", //$NON-NLS-1$
             "get_mcp_history", //$NON-NLS-1$
             "list_git_branches", "switch_git_branch", "set_branch_infobase", "create_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            "get_check_description", "get_platform_documentation"); //$NON-NLS-1$ //$NON-NLS-2$
+            "get_check_description", "apply_quick_fix", "get_platform_documentation"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+        assign(COMPARISON,
+            "compare_configurations", "get_comparison_node", "merge_rules"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(GIT,
             "git"); //$NON-NLS-1$

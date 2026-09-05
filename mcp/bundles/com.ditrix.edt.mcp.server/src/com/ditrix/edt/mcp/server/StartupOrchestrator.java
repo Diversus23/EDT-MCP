@@ -6,10 +6,13 @@
 
 package com.ditrix.edt.mcp.server;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 import org.osgi.framework.BundleContext;
 
 import com.ditrix.edt.mcp.server.groups.IGroupService;
 import com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl;
+import com.ditrix.edt.mcp.server.utils.WorkmateChatSessionPublisher;
 
 /**
  * Orchestrates the EDT MCP plugin's startup and shutdown side effects that are
@@ -21,12 +24,13 @@ import com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl;
  * <ol>
  *   <li>create + activate the {@link IGroupService};</li>
  *   <li>(non-headless) initialize {@code FilterByTagManager} to reset toggle state;</li>
- *   <li>(non-headless) initialize {@code NavigatorToolbarCustomizer} on the UI thread
+ *   <li>(non-headless) initialize the Navigator enhancement activation manager and
+ *       {@code NavigatorToolbarCustomizer} on the UI thread
  *       via {@code Display.asyncExec}.</li>
  * </ol>
- * Teardown reverses these on {@link #stop()}: dispose the navigator toolbar
- * customizer (non-headless, only when already on a live UI thread), deactivate
- * the group service, then stop the {@code UpdateChecker} scheduler.
+ * Teardown reverses these on {@link #stop()}: dispose the Navigator integrations
+ * (non-headless), deactivate the group service, then stop the {@code UpdateChecker}
+ * scheduler.
  * <p>
  * This class owns the {@link IGroupService} reference; {@link Activator}
  * delegates {@code getGroupService()} to {@link #getGroupService()} so all
@@ -34,8 +38,15 @@ import com.ditrix.edt.mcp.server.groups.internal.GroupServiceImpl;
  */
 public class StartupOrchestrator
 {
+    /** Invalidates UI initialization work posted by an earlier lifecycle. */
+    private final AtomicLong lifecycleGeneration = new AtomicLong();
+
     /** Group service instance (created directly, not via OSGi DS to avoid circular references) */
     private IGroupService groupService;
+
+    /** Publishes the constant JShell session 1C:Workmate's chat needs to call the bridge. */
+    private final WorkmateChatSessionPublisher chatSessionPublisher =
+        new WorkmateChatSessionPublisher();
 
     /**
      * Runs the startup steps in the same order as the original
@@ -45,6 +56,8 @@ public class StartupOrchestrator
      */
     public void start(boolean headless)
     {
+        long startGeneration = lifecycleGeneration.incrementAndGet();
+
         // Create group service directly (not via OSGi DS to avoid circular references)
         groupService = new GroupServiceImpl();
         ((GroupServiceImpl) groupService).activate();
@@ -52,14 +65,36 @@ public class StartupOrchestrator
         // Initialize UI components only in non-headless mode
         if (!headless)
         {
+            // Best effort and off the startup path: 1C:Workmate is optional and comes up
+            // on its own schedule, so this retries quietly instead of blocking or failing.
+            chatSessionPublisher.start();
+
             // Initialize filter manager to reset toggle state on startup
             com.ditrix.edt.mcp.server.tags.ui.FilterByTagManager.getInstance();
 
-            // Initialize navigator toolbar customizer to hide standard Collapse All button
+            // Initialize Navigator integrations.
             org.eclipse.swt.widgets.Display.getDefault().asyncExec(() -> {
-                try {
+                if (lifecycleGeneration.get() != startGeneration)
+                {
+                    return;
+                }
+
+                try
+                {
+                    com.ditrix.edt.mcp.server.groups.ui.NavigatorEnhancementManager
+                        .getInstance().initialize();
+                }
+                catch (Exception e)
+                {
+                    Activator.logError("Failed to initialize NavigatorEnhancementManager", e); //$NON-NLS-1$
+                }
+
+                try
+                {
                     com.ditrix.edt.mcp.server.ui.NavigatorToolbarCustomizer.getInstance().initialize();
-                } catch (Exception e) {
+                }
+                catch (Exception e)
+                {
                     Activator.logError("Failed to initialize NavigatorToolbarCustomizer", e); //$NON-NLS-1$
                 }
             });
@@ -74,17 +109,29 @@ public class StartupOrchestrator
      */
     public void stop(boolean headless)
     {
+        lifecycleGeneration.incrementAndGet();
+        chatSessionPublisher.stop();
+
         // Dispose UI components only in non-headless mode.
-        // Never block on the UI thread from here: stop() runs on the OSGi
-        // framework shutdown thread after the workbench event loop has exited,
-        // so a syncExec never returns and pins the JVM — EDT keeps running as
-        // a background process (#135). Display.getDefault() is also forbidden
-        // here: with the display already disposed it would CREATE a new one on
-        // the shutdown thread. Listener teardown is best-effort — widgets die
-        // with the display — so run it inline only when already on a live UI
-        // thread and skip it otherwise.
+        // Never wait for the UI thread from here: during full shutdown stop()
+        // can run after the workbench event loop has exited, so a syncExec never
+        // returns and pins the JVM — EDT keeps running as a background process
+        // (#135). Display.getDefault() is also forbidden here: with the display
+        // already disposed it would CREATE a new one on the shutdown thread.
+        // NavigatorEnhancementManager posts its listener teardown to its captured
+        // UI display during a live bundle update and never blocks this thread.
         if (!headless)
         {
+            try
+            {
+                com.ditrix.edt.mcp.server.groups.ui.NavigatorEnhancementManager
+                    .getInstance().dispose();
+            }
+            catch (Exception e)
+            {
+                // Ignore - workbench may be closing
+            }
+
             org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getCurrent();
             if (display != null && !display.isDisposed())
             {

@@ -52,7 +52,7 @@ def _structured(r, ctx):
 # ──────────────────────────────────────────────────────────────────────────────
 # HAPPY (non-mutating): adopting an ALREADY-adopted object is benign
 # ──────────────────────────────────────────────────────────────────────────────
-@e2e_test(tool="adopt_metadata_object", kind="write")
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
 def test_already_adopted_object_is_benign_not_readopted():
     """The fixture extension already adopts CommonModule.Calc. Adopting it again must hit the
     isAdopted branch: action='alreadyAdopted', objectBelonging='ADOPTED', and NO mutation.
@@ -70,6 +70,14 @@ def test_already_adopted_object_is_benign_not_readopted():
         raise AssertionError("expected objectBelonging=ADOPTED; got %r" % s.get("objectBelonging"))
     if s.get("extensionProject") != TESTS_PROJECT:
         raise AssertionError("expected extensionProject=%s; got %r" % (TESTS_PROJECT, s.get("extensionProject")))
+
+    # #408: "queued nothing" is a FINDING and is published as an empty list. The distinction
+    # that matters is against ABSENT, which means "the tool could not tell" - collapsing the two
+    # is what let a no-op success and an unknown scope share one value in the old barrier.
+    if s.get("writtenProjects") != []:
+        raise AssertionError(
+            "a success that queued nothing must publish an EMPTY writtenProjects, got %r"
+            % (s.get("writtenProjects"),))
 
     assert_no_diff("adopt of an already-adopted object must not touch the base project")
 

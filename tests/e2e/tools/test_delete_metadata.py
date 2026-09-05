@@ -3,21 +3,24 @@ e2e tests for delete_metadata (kind: write-metadata).
 
 delete_metadata deletes a metadata node (a top-level object or a subordinate member:
 attribute / tabular section / dimension / resource / enum value) addressed by a 1C
-full-name FQN, via EDT's refactoring service, cleaning up every reference in BSL code,
-forms and other metadata. It folds the former delete_metadata_object onto the unified
+full-name FQN. A TOP-LEVEL object goes via EDT's refactoring service, which cleans up
+the references it CAN auto-clean in BSL code, forms and other metadata (one it cannot
+blocks the delete instead); a form object / form member / XDTO member is removed from
+its own container with no reference cascade at all. It folds the former delete_metadata_object onto the unified
 `fqn` parameter and the shared MetadataNodeResolver.
 
 JSON-responseType tool (payload in r.structured). Two-phase:
   * confirm absent/false -> PREVIEW: action="preview", refactoringTitle, items,
     blocking, blockingReferences, blockingReferencesCount, message. Model NOT mutated.
-  * confirm=true         -> EXECUTE: action="executed"; the node is gone and its
-    references are cleaned.
+  * confirm=true         -> EXECUTE: action="executed"; the node is gone. On the
+    md-refactoring path its auto-cleanable references are cleaned too (with force,
+    the ones that blocked are left dangling); a form / XDTO member gets no cleanup.
 
 reset: kind="write-metadata" -> the orchestrator runs reset_model() (clean_project,
 discarding the unsaved delete) AFTER each test, so each test starts clean.
 
 Fixture inventory (TestConfiguration, English Names):
-  Catalog.Catalog (attribute "Attribute", form ItemForm), CommonModule.Error/OK/Calc,
+  Catalog.Catalog (attribute "Attribute", form ItemForm), CommonModule.Error/OK/Calc/DrySignal,
   CommonForm.Form, Subsystem.Subsystem, CommonAttribute.CommonAttribute,
   SessionParameter.SessionParameter.
 """
@@ -32,13 +35,23 @@ from harness import (
     assert_no_diff,
     assert_tree_unchanged,
     assert_diff_contains,
+    assert_disk_lacks,
+    assert_disk_path_gone,
     poll_disk_path_gone,
     poll_disk_lacks,
+    poll_disk_contains,
+    read_disk,
     tree_snapshot,
+    settle_or_fail,
     wait_for_project_ready,
     e2e_test,
     PROJECT,
 )
+
+
+# The fixture Catalog's own .mdo — the file a member delete under Catalog.Catalog has to rewrite,
+# because a member's container IS its owning top object.
+_CATALOG_MDO = "src/Catalogs/Catalog/Catalog.mdo"
 
 
 def _list_commonmodules():
@@ -59,6 +72,8 @@ def _list_catalogs():
 
 @e2e_test(tool="delete_metadata", kind="write-metadata")
 def test_confirm_deletes_top_object_gone_from_model_and_disk():
+    # Settle first, so this measures the delete rather than a backlog it inherited.
+    settle_or_fail("this delete (its Configuration.mdo export is asserted below)")
     assert_contains(_list_commonmodules(), "Calc", "baseline: CommonModule.Calc must exist")
 
     r = call("delete_metadata", {"projectName": PROJECT, "fqn": "CommonModule.Calc", "confirm": True})
@@ -68,13 +83,48 @@ def test_confirm_deletes_top_object_gone_from_model_and_disk():
         "confirm=true must take the execute branch (action=executed): %r" % (r.structured,)
     assert r.structured.get("fqn") == "CommonModule.Calc", "must echo the target fqn"
 
+    # The two files are asserted DIFFERENTLY, and the difference is the whole point of #408.
+    #
+    # #406 gave the write tools an export barrier, but a barrier that only WAITS is ordered with an
+    # export only when the same call SUBMITTED it. Until #408 the generic mdclass delete path
+    # submitted nothing at all - the refactoring scheduled its own save - so "is the export segment
+    # quiet?" could answer yes truthfully and too early. That is not theory: on run 31728870176 the
+    # Configuration.mdo assertion below failed at 6.34s (the call returned on its own, nowhere near
+    # the 60s deadline) with the object's own .mdo ALREADY gone, Configuration.mdo not yet
+    # rewritten, and none of the barrier's failure markers in that shard's EDT log.
+    #
+    # Now the delete queues the export of the CONTAINER that registers the deleted node - here the
+    # Configuration - before the barrier runs, so nothing of THIS call's export is still queued
+    # when it answers, and the file is read immediately. (Which is what makes the read fair, not a
+    # promise about the bytes: the platform logs a per-file write failure and completes the
+    # computation anyway, so a drained queue never means "the write succeeded" - the assertion
+    # below is what checks that.)
+    #
+    # The object's OWN .mdo is still polled, and deliberately: EDT builds a save task by looking the
+    # FQN up in the transaction, so an FQN that no longer resolves yields no task, and that file
+    # cannot be resubmitted by anyone but the refactoring. Asserting more than the tool promises is
+    # the same defect as promising more than it does.
+    #
+    # Why both files at all: they are SEPARATE export tasks with no ordering between them, so the
+    # tree passes through a state where Configuration.mdo still references an object whose own file
+    # is already gone.
+    #
+    # ORDER MATTERS HERE, and it is the difference between a proof and a decoration: the immediate
+    # assertion has to be the FIRST thing after the call. Putting the 10s poll first would hand a
+    # build that queued nothing ten seconds to finish, and the "immediate" read below would then
+    # pass on the very defect it exists to catch.
+    #
+    # assert_disk_lacks, not poll_disk_lacks: the polling helper treats a MISSING file as "lacks",
+    # so it would also pass if Configuration.mdo vanished entirely. The claim is that the file is
+    # present and already correct the moment the call returned.
+    assert_disk_lacks("src/Configuration/Configuration.mdo", "CommonModule.Calc",
+                      ctx="delete must remove the Configuration.mdo collection reference")
+    poll_disk_path_gone("src/CommonModules/Calc/Calc.mdo",
+                        ctx="delete must remove the object's own .mdo from disk")
+
     after = _list_commonmodules()
     assert_not_contains(after, "| Calc ", "CommonModule.Calc must be GONE from the model")
     assert_contains(after, "OK", "sibling CommonModule.OK must survive a targeted delete")
-    poll_disk_path_gone("src/CommonModules/Calc/Calc.mdo",
-                        ctx="delete must remove the object's own .mdo from disk")
-    poll_disk_lacks("src/Configuration/Configuration.mdo", "CommonModule.Calc",
-                    ctx="delete must remove the Configuration.mdo collection reference")
 
 
 @e2e_test(tool="delete_metadata", kind="write-metadata")
@@ -83,7 +133,13 @@ def test_confirm_deletes_member_attribute():
     attr = "E2EDelAttr"
     cr = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute." + attr})
     assert_ok(cr, "seed attribute to delete")
-    wait_for_project_ready()
+    settle_or_fail("this delete (the owner .mdo export is asserted below)")
+    # POSITIVE CONTROL for the disk assertion after the delete. create_metadata reports success
+    # even when its own export did not complete, so without this the "gone from the owner .mdo"
+    # check below would also pass on a token that never got written - the failure mode and the
+    # pass would be the same observation.
+    poll_disk_contains(_CATALOG_MDO, "<name>%s</name>" % attr,
+                       ctx="baseline: the seeded attribute must be in the owner .mdo before it is deleted")
 
     r = call("delete_metadata", {
         "projectName": PROJECT,
@@ -92,6 +148,25 @@ def test_confirm_deletes_member_attribute():
     })
     assert_ok(r, "delete the seeded attribute")
     assert r.structured.get("action") == "executed", "member delete must execute: %r" % (r.structured,)
+    # #408: a confirmed delete states the project it wrote in, so the barrier waits for the export
+    # of THAT project rather than for whatever the arguments named. The cascade participants are
+    # awaited too but deliberately NOT listed here - "the platform may have written there" must not
+    # be published under a name that says "wrote".
+    assert r.structured.get("writtenProjects") == [PROJECT],         "a confirmed delete must publish the project it wrote in: %r" % (
+            r.structured.get("writtenProjects"),)
+    # The member half of #408, and it must come BEFORE any other MCP round trip: a member's
+    # container IS its owning top object, so the owner .mdo is the file this call queued the export
+    # of, and it has to be correct the moment the call returned. An intervening call is time an
+    # early-returning build could use to finish, which is how the assertion stops testing anything.
+    assert_disk_lacks(_CATALOG_MDO, "<name>%s</name>" % attr,
+                      ctx="a member delete must remove the attribute from the owner .mdo")
+    # MODEL read-back, next to the disk one: "gone from the file" and "gone from the model" are
+    # separate claims, and a delete that satisfied only one of them is exactly the drift this suite
+    # exists to catch.
+    details = call("get_metadata_details",
+                   {"projectName": PROJECT, "objectFqns": ["Catalog.Catalog"], "full": True})
+    assert_ok(details, "read back the owner after the member delete")
+    assert_not_contains(details.text, attr, "the deleted attribute must be GONE from the model")
     # The parent catalog must survive a member delete.
     assert_contains(_list_catalogs(), "| Catalog ",
                     "a member delete must NOT delete the parent Catalog.Catalog")
@@ -198,8 +273,47 @@ def test_preview_without_confirm_lists_changepoints_and_does_not_mutate():
     assert_contains(r.structured.get("message", ""), "confirm=true",
                     "preview message must instruct re-calling with confirm=true")
 
+    # #408: the preview states that it queued nothing, instead of the barrier inferring it from
+    # the `confirm` ARGUMENT - which says the caller authorized a destructive path, not that
+    # anything was written.
+    assert r.structured.get("writtenProjects") == [],         "a preview writes nowhere and must say so: %r" % (r.structured.get("writtenProjects"),)
+
     assert_contains(_list_commonmodules(), "Calc", "preview must NOT delete CommonModule.Calc")
     assert_no_diff("a preview must not touch the project on disk")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_preview_accepts_explicit_timeout_and_clamps_out_of_range_value():
+    assert_contains(_list_commonmodules(), "Calc", "baseline: CommonModule.Calc must exist")
+
+    for timeout in (600, 1):
+        r = call("delete_metadata", {
+            "projectName": PROJECT,
+            "fqn": "CommonModule.Calc",
+            "timeout": timeout,
+        })
+        assert_ok(r, "preview with timeout=%s" % timeout)
+        assert r.structured is not None, "a JSON tool must return structuredContent"
+        assert r.structured.get("action") == "preview", \
+            "timeout=%s must still return a normal preview: %r" % (timeout, r.structured)
+        assert r.structured.get("fqn") == "CommonModule.Calc", \
+            "the preview must echo its target when timeout=%s" % timeout
+        assert r.structured.get("writtenProjects") == [], \
+            "a bounded preview must still declare that it wrote nowhere: %r" % (r.structured,)
+
+    assert_contains(_list_commonmodules(), "Calc",
+                    "explicit and clamped preview timeouts must not delete CommonModule.Calc")
+    assert_no_diff("explicit and clamped preview timeouts must not touch the project on disk")
+
+    # The other half of #509: the guide has to SAY what a timeout leaves the model in. This is what
+    # makes the test fail on a pre-fix server - an unknown 'timeout' argument is simply ignored, so
+    # the calls above would pass there too.
+    g = call("get_tool_guide", {"toolName": "delete_metadata"})
+    assert_ok(g, "the delete_metadata guide must be readable")
+    assert_contains(g.text, "Timeout, and what the model is left in",
+                    "the guide must document what a timed-out delete leaves the model in")
+    assert_contains(g.text, "`timeout`",
+                    "the guide's parameter list must name the timeout parameter")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -291,6 +405,40 @@ def test_delete_form_group_cascades_subtree():
 
 
 @e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_form_field_preview_lists_the_handler_it_takes():
+    # A field's event handler lives in a `handlers` containment - not in `items`, not a FormItem - so
+    # the walk that named the features it followed never saw it, while EcoreUtil.remove takes it with
+    # the field. The delete was authorized and previewed as "one member" and carried the procedure
+    # binding off silently (issue #295 review). The radius now follows the CONTAINMENT structure.
+    _seed_form_attribute("DHAttr")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.DHField",
+        "properties": [{"name": "dataPath", "value": "DHAttr"}]})
+    assert_ok(r, "seed bound field")
+    wait_for_project_ready()
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.DHField.Handler.OnChange",
+        "properties": [{"name": "procedure", "value": "DHFieldOnChange_zz"}]})
+    assert_ok(r, "seed the field's OnChange handler")
+    wait_for_project_ready()
+
+    fqn = "Catalog.Catalog.Form.ItemForm.Field.DHField"
+    pv = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn})
+    assert_ok(pv, "preview the field delete")
+    names = [it.get("name") for it in (pv.structured.get("items") or [])]
+    assert "DHFieldOnChange_zz" in names, \
+        "the preview must list the handler the delete takes with the field: %r" % (pv.structured,)
+    assert_contains(pv.structured.get("message", ""), "EventHandler",
+                    "the message must break the radius down by what it actually found")
+
+    r = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn, "confirm": True})
+    assert_ok(r, "delete the field (confirm)")
+    poll_disk_lacks(_FORM, "DHFieldOnChange_zz",
+                    ctx="the handler binding must be gone from the .form with its field")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
 def test_delete_form_handler_confirm():
     # Seed a form-level OnOpen handler with a distinctive proc name, then delete it by event FQN.
     r = call("create_metadata", {
@@ -345,6 +493,125 @@ def test_delete_form_missing_member_is_error():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Negative — the FQN's KIND segment is part of the address, not a hint (issue #343).
+# Before the fix every kind except Attribute / Command fell through to a by-NAME item
+# search, so 'Button.<a field>' - and even a misspelt 'Fielld.<a field>' - previewed
+# removing the FIELD and, with confirm=true, would have deleted the wrong element.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_form_member_addressed_with_a_foreign_kind_is_refused():
+    _seed_form_attribute("KpAttr")
+    poll_disk_contains(_FORM, "KpAttr", timeout=60,
+                       ctx="the seeded attribute must be visible before the field binds to it")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.KindProbeFld",
+        "properties": [{"name": "dataPath", "value": "KpAttr"}]})
+    assert_ok(r, "seed the probe field")
+    wait_for_project_ready()
+    poll_disk_contains(_FORM, "KindProbeFld", timeout=60,
+                       ctx="the seeded probe field must be on disk first")
+
+    # Every foreign kind - and a typo in the kind segment - is refused, in PREVIEW already.
+    for kind in ("Button", "Decoration", "Group", "Table", "Fielld"):
+        fqn = "Catalog.Catalog.Form.ItemForm.%s.KindProbeFld" % kind
+        pv = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn})
+        e = assert_error(pv, "preview a delete addressed with kind '%s'" % kind)
+        assert_error_quality(e, names=["KindProbeFld"], suggests=["Field"],
+                             ctx="a foreign kind must name the kind the element REALLY has "
+                                 "(kind '%s')" % kind)
+        assert_contains(e, "Catalog.Catalog.Form.ItemForm.Field.KindProbeFld",
+                        "the refusal must spell the CORRECTED address (kind '%s')" % kind)
+
+    # confirm=true is refused the same way, and the field is still on disk afterwards.
+    r = call("delete_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button.KindProbeFld",
+        "confirm": True})
+    assert_error(r, "a CONFIRMED delete addressed with a foreign kind")
+    assert_contains(read_disk(_FORM), "KindProbeFld",
+                    "the wrongly-addressed delete must not have removed the field")
+
+    # The element's OWN kind still deletes it (the fix refuses the wrong address, not the right one).
+    r = call("delete_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.KindProbeFld",
+        "confirm": True})
+    assert_ok(r, "delete the field by its own kind")
+    poll_disk_lacks(_FORM, "KindProbeFld", timeout=60,
+                    ctx="the correctly-addressed delete must remove the field")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_form_handler_owner_with_a_foreign_kind_is_refused():
+    # The OWNER's kind segment of an item-level handler address is resolved too: a handler
+    # addressed at 'Button.<a field>' must not be found on the same-named FIELD.
+    _seed_form_attribute("HkAttr")
+    poll_disk_contains(_FORM, "HkAttr", timeout=60,
+                       ctx="the seeded attribute must be visible before the field binds to it")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.HandlerKindFld",
+        "properties": [{"name": "dataPath", "value": "HkAttr"}]})
+    assert_ok(r, "seed the handler-owner probe field")
+    wait_for_project_ready()
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.HandlerKindFld.Handler.OnChange",
+        "properties": [{"name": "procedure", "value": "HandlerKindProc_zz"}]})
+    assert_ok(r, "seed the field's OnChange handler")
+    wait_for_project_ready()
+    poll_disk_contains(_FORM, "HandlerKindProc_zz", timeout=60,
+                       ctx="the seeded handler must be on disk first")
+
+    r = call("delete_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Button.HandlerKindFld.Handler.OnChange",
+        "confirm": True})
+    e = assert_error(r, "delete a handler addressed at an owner of a foreign kind")
+    assert_error_quality(e, names=["HandlerKindFld"], suggests=["Field"],
+                         ctx="a foreign owner kind must name the kind the owner really has")
+    # The miss is the OWNER's, not the handler's: blaming a missing handler would be false about an
+    # element that does have one, and the message must name the kind that found nothing.
+    assert_contains(e, "Form item not found",
+                    "a foreign OWNER kind must be reported as the owner miss it is")
+    assert_contains(e, "(kind 'Button')", "the refusal must name the kind that found nothing")
+    assert_not_contains(e, "No event handler",
+                        "the handler exists - the address named the wrong owner kind")
+    assert_contains(read_disk(_FORM), "HandlerKindProc_zz",
+                    "the wrongly-addressed handler delete must not have removed the handler")
+
+    # The owner's own kind still deletes it.
+    r = call("delete_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.HandlerKindFld.Handler.OnChange",
+        "confirm": True})
+    assert_ok(r, "delete the handler by the owner's own kind")
+    poll_disk_lacks(_FORM, "HandlerKindProc_zz", timeout=60,
+                    ctx="the correctly-addressed handler delete must remove the binding")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_preview_reaches_a_designer_child_by_its_inherited_kind_only():
+    # Regression guard for the OTHER half of issue #343: the designer's own children have no kind
+    # token of their own, but a token addresses its EClass AND its subclasses - an AutoCommandBar IS
+    # a Group. So the form-root command bar keeps exactly ONE supported address ('Group'), and a
+    # foreign token must NOT reach it either ("no token denotes it" is not "every token fits").
+    pv = call("delete_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.FormCommandBar"})
+    assert_ok(pv, "preview the auto command bar via its inherited kind 'Group'")
+    names = [it.get("name") for it in (pv.structured.get("items") or [])]
+    assert "FormCommandBar" in names, \
+        "the auto command bar must stay addressable via 'Group': %r" % (pv.structured,)
+
+    for kind in ("Field", "Button", "Decoration", "Table", "Grroup"):
+        r = call("delete_metadata", {
+            "projectName": PROJECT,
+            "fqn": "Catalog.Catalog.Form.ItemForm.%s.FormCommandBar" % kind})
+        e = assert_error(r, "preview the auto command bar via the foreign kind '%s'" % kind)
+        assert_error_quality(e, names=["FormCommandBar"], suggests=["not found"],
+                             ctx="a designer child must not answer to a foreign kind ('%s')" % kind)
+    assert_no_diff("previews must not touch the project on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Happy — FORM OBJECT delete (symmetric with create_metadata). An owned form
 # created by the 4-part FQN 'Type.Object.Form.Name' is deletable by the SAME FQN
 # (previously returned "Node not found"). Preview (no confirm) lists it; confirm=true
@@ -359,6 +626,14 @@ def test_delete_form_object_preview_then_confirm():
     cr = call("create_metadata", {"projectName": PROJECT, "fqn": fqn})
     assert_ok(cr, "seed form object to delete")
     wait_for_project_ready()
+    # A form-level event handler: it lives in the form's `handlers` containment, which is neither the
+    # items tree nor one of the three named features the old count walked - so a whole-form delete
+    # carried the procedure binding off unmentioned (issue #295 review).
+    h = call("create_metadata", {
+        "projectName": PROJECT, "fqn": fqn + ".Handler.OnOpen",
+        "properties": [{"name": "procedure", "value": "ZDelFormOnOpen_zz"}]})
+    assert_ok(h, "seed a form-level handler")
+    wait_for_project_ready()
 
     # Preview (confirm omitted): the form is LISTED and nothing is removed.
     pv = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn})
@@ -368,6 +643,20 @@ def test_delete_form_object_preview_then_confirm():
     assert form in names, "preview items must list the form: %r" % (pv.structured,)
     assert_contains(pv.structured.get("message", ""), "confirm=true",
                     "preview must instruct re-calling with confirm=true")
+    assert "ZDelFormOnOpen_zz" in names, \
+        "the preview must list the handler the form delete takes with it: %r" % (pv.structured,)
+    assert_contains(pv.structured.get("message", ""), "EventHandler",
+                    "the breakdown must name what the walk actually found")
+    # ...and it must NOT be padded with the form's DERIVED data (the form-data structure, the BSL
+    # context types/parameters/events, the standard commands): none of that is authored or persisted,
+    # and counting it turned a small form into a 450-entry prompt (found by this round's live probe).
+    assert len(names) < 60, \
+        "the preview must count authored content, not derived data: %d entries" % (len(names),)
+    # The prompt counts the form's CONTENT and points the caller here for the details, so the preview
+    # has to list that content too - it used to answer with the BasicForm alone (issue #295 review).
+    # A fresh form already carries its auto command bar.
+    assert len(names) > 1, \
+        "the preview must list the form's content, not the form alone: %r" % (pv.structured,)
     # The form must still render after a preview (not mutated).
     d = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn]})
     assert_ok(d, "the form must still resolve after a preview")
@@ -378,14 +667,17 @@ def test_delete_form_object_preview_then_confirm():
     assert_ok(r, "delete the form object (confirm)")
     assert r.structured.get("action") == "executed", "confirm must execute: %r" % (r.structured,)
     assert r.structured.get("fqn") == fqn, "must echo the target form fqn"
-    poll_disk_path_gone("src/Catalogs/Catalog/Forms/%s/Form.form" % form,
-                        ctx="the deleted form's content Form.form must be gone from disk")
+    # IMMEDIATE, unlike the top-object delete above, and for the reason spelled out there: the
+    # owned-form branch calls forceExportToDisk itself, so its submission happens-before the #406
+    # barrier's wait and the files really are settled when the call returns.
+    assert_disk_path_gone("src/Catalogs/Catalog/Forms/%s/Form.form" % form,
+                          ctx="the deleted form's content Form.form must be gone from disk")
     # The form's whole resource FOLDER (not just Form.form) must be gone - an orphan
     # Forms/<Name>/ folder survived the model delete, the owner delete and resync_to_disk before.
-    poll_disk_path_gone("src/Catalogs/Catalog/Forms/%s" % form,
-                        ctx="the deleted form's resource folder must be gone from disk")
-    poll_disk_lacks("src/Catalogs/Catalog/Catalog.mdo", form,
-                    ctx="the deleted form's <forms> entry must be gone from the owner .mdo")
+    assert_disk_path_gone("src/Catalogs/Catalog/Forms/%s" % form,
+                          ctx="the deleted form's resource folder must be gone from disk")
+    assert_disk_lacks("src/Catalogs/Catalog/Catalog.mdo", form,
+                      ctx="the deleted form's <forms> entry must be gone from the owner .mdo")
     # With the orphan folder gone, get_metadata_details on the form FQN no longer resolves it -
     # it must NOT render a live structure, and must behave exactly like a form that NEVER existed (the
     # form branch reports the same unresolvable-form ERROR for both, so the deleted form is now
@@ -474,7 +766,10 @@ def test_confirm_without_force_is_blocked_by_incoming_reference():
 
     r = call("delete_metadata", {"projectName": PROJECT, "fqn": "Catalog." + cat, "confirm": True})
     e = assert_error(r, "delete a still-referenced catalog without force must be blocked")
-    assert_error_quality(e, names=[cat], suggests=["referenced", "force"],
+    # "reference", not "referenced": the message distinguishes incoming REFERENCES from platform
+    # prohibitions now, so it says "incoming reference(s)" - pinning one inflection would fail the
+    # test for a wording that is more precise, not less.
+    assert_error_quality(e, names=[cat], suggests=["reference", "force"],
                          ctx="a blocked delete names the target and points at force=true")
     # Structured envelope marks the block and lists the referencer.
     assert r.structured is not None, "a JSON tool must return structuredContent on a blocked delete"
@@ -645,3 +940,37 @@ def test_delete_xdto_member():
     assert_ok(d, "get_metadata_details read-back on the package")
     assert_not_contains(d.text, "| Gone |", "the deleted property must be GONE from the model read-back")
     assert_contains(d.text, "| Kept |", "the surviving property must remain in the model read-back")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_preview_of_a_collection_attribute_lists_its_columns():
+    """The preview must name the COLUMNS the confirmed delete will take with the attribute.
+
+    Columns are containment children of a collection-typed form attribute, so EcoreUtil.remove
+    removes them - but they are not in the `items` tree the preview used to walk. Listing only the
+    attribute would understate the destruction of a two-phase confirm (issue #295 review).
+    """
+    attr, col = "E2EDelColOwner", "E2EDelCol"
+    a = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr})
+    assert_ok(a, "seed the attribute")
+    wait_for_project_ready()
+    t = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    assert_ok(t, "make it a ValueTable")
+    wait_for_project_ready()
+    c = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr + ".Column." + col})
+    assert_ok(c, "seed the column")
+    wait_for_project_ready()
+
+    r = call("delete_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr})
+    assert_ok(r, "preview the collection attribute delete")
+    assert r.structured.get("action") == "preview", \
+        "confirm absent must take the preview branch: %r" % (r.structured,)
+    names = [str(item.get("name")) for item in (r.structured.get("items") or [])]
+    assert col in names, \
+        "the preview must list the column the delete will remove: %r" % (names,)

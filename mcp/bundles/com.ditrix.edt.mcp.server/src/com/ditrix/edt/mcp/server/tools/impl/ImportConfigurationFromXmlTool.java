@@ -56,10 +56,8 @@ public class ImportConfigurationFromXmlTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Import a configuration from a directory of XML files into a NEW EDT " //$NON-NLS-1$
-             + "project (EDT menu: Import); the reverse of export_configuration_to_xml. " //$NON-NLS-1$
-             + "The projectName must not already exist in the workspace. " //$NON-NLS-1$
-             + "Full parameters and examples: call get_tool_guide('import_configuration_from_xml')."; //$NON-NLS-1$
+        return "Create an EDT project from exported 1C configuration XML files. Parameters and examples: " //$NON-NLS-1$
+            + "get_tool_guide('import_configuration_from_xml')."; //$NON-NLS-1$
     }
 
     @Override
@@ -107,6 +105,9 @@ public class ImportConfigurationFromXmlTool implements IMcpTool
             xmlVersion = null;
         }
 
+        IWorkspace workspace = ResourcesPlugin.getWorkspace();
+        boolean importApiEntered = false;
+        boolean importApiReturned = false;
         try
         {
             // Normalize to an absolute path so the underlying CLI API isn't
@@ -139,7 +140,6 @@ public class ImportConfigurationFromXmlTool implements IMcpTool
             // message) and we'd surface it via the catch block — but a clean
             // up-front error is friendlier and matches the validation pattern
             // used elsewhere (DeleteMetadataTool, CleanProjectTool, etc.).
-            IWorkspace workspace = ResourcesPlugin.getWorkspace();
             IProject existing = workspace.getRoot().getProject(projectName);
             if (existing != null && existing.exists())
             {
@@ -159,7 +159,9 @@ public class ImportConfigurationFromXmlTool implements IMcpTool
             // importProject(Path importSource, String projectName, String nature, String xmlVersion)
             Method method = api.getClass().getMethod("importProject", //$NON-NLS-1$
                 Path.class, String.class, String.class, String.class);
+            importApiEntered = true;
             method.invoke(api, importPath, projectName, projectNature, xmlVersion);
+            importApiReturned = true;
 
             refreshImportedProject(workspace, projectName);
 
@@ -192,7 +194,15 @@ public class ImportConfigurationFromXmlTool implements IMcpTool
         }
         catch (Exception e)
         {
-            return CliReflectionErrors.toErrorJson(e, "Import", "CLI"); //$NON-NLS-1$ //$NON-NLS-2$
+            String error = CliReflectionErrors.toErrorJson(e, "Import", "CLI"); //$NON-NLS-1$ //$NON-NLS-2$
+            IProject created = workspace.getRoot().getProject(projectName);
+            // Derived from the workspace after the failure: the reflective import may have
+            // succeeded and only the close/open/refresh read-back failed.
+            if (importApiReturned || created != null && created.exists())
+            {
+                return ToolResult.markErrorAfterMutation(error);
+            }
+            return importApiEntered ? ToolResult.markErrorWithUnknownMutationOutcome(error) : error;
         }
     }
 

@@ -1,6 +1,6 @@
 # EDT-MCP — code conduct (the minefield map)
 
-A 1C:EDT plugin (Maven/Tycho, Eclipse OSGi) exposing an MCP server (~62 tools) that drives EDT. This file is **what NOT to do** and **where to stop and think twice**. Claude Code loads it automatically; the "how to do it right" lives in the skills.
+A 1C:EDT plugin (Maven/Tycho, Eclipse OSGi) exposing an MCP server that drives EDT. This file is **what NOT to do** and **where to stop and think twice**. Claude Code loads it automatically; the "how to do it right" lives in the skills.
 
 > **Prime directive.** The project is mid-refactor toward shared helpers. Write new code against the **target** architecture (the skills), do NOT copy the existing duplication. Do not grow the debt.
 
@@ -10,19 +10,7 @@ A 1C:EDT plugin (Maven/Tycho, Eclipse OSGi) exposing an MCP server (~62 tools) t
 
 ## 📚 The skills (load the relevant one before working — `.claude/skills/`)
 
-The `.claude/hooks/edt-skill-router.js` hook auto-suggests these when you touch matching files.
-
-| Skill | When to load it |
-|---|---|
-| `edt-mcp-architecture` | Starting work; deciding where new code belongs; the map of shared helpers + layering. |
-| `edt-mcp-tool-conventions` | Editing any `tools/impl` class; parameter naming, error shape, output format (Markdown vs JSON), pagination. |
-| `edt-mcp-bilingual` | Any read/write/resolve/search of metadata or BSL — the ru/en correctness checklist (the #1 bug source). |
-| `edt-mcp-new-tool` | Adding/scaffolding a tool — the full contract: IMcpTool surface, schema, registration, MANIFEST, the two test ratchets, golden, README, the compile→review→redeploy→live contour. |
-| `edt-mcp-build-test` | Building the plugin + running unit/e2e tests; the test conventions. |
-| `edt-mcp-e2e-testing` | Writing/running the **automated** black-box suite `tests/e2e/` (one `test_<tool>.py` per tool). |
-| `edt-mcp-testing` | **Manual** per-tool live validation — `references/<family>/<tool>.md`: exact call, expected result, gotchas. |
-| `edt-mcp-yaxunit` | Writing/running YAXUnit 1C unit tests via `run_yaxunit_tests` / `debug_yaxunit_tests`. |
-| `edt-mcp-ready-to-deploy` | **Wrapping up — the final "definition of done" gate.** Run when a piece of work is finished, before declaring it done or merging (hygiene → tests → build → README → live redeploy → golden → full e2e → conformance → clean tree). |
+The `edt-mcp-*` skills carry the "how to do it right"; each one's description says when to load it, and the `.claude/hooks/edt-skill-router.js` hook auto-suggests the matching skill when you touch a file. **Wrapping up a piece of work is the one you must not skip: `edt-mcp-ready-to-deploy` is the final "definition of done" gate before declaring done or merging.**
 
 ---
 
@@ -69,35 +57,25 @@ The `.claude/hooks/edt-skill-router.js` hook auto-suggests these when you touch 
 
 1. **Is there already a shared helper?** `grep` under `utils/` (`MetadataTypeUtils`, `MetadataNodeResolver`, `ProjectContext`, `BmTransactions`, `JsonUtils`, `Pagination`, `MarkdownUtils`). Don't write the 47th copy.
 2. **What's the canonical parameter/error/output?** → `edt-mcp-tool-conventions`.
-3. **Is this bilingual?** → `edt-mcp-bilingual`.
-4. **God-class / cascade / mirror feature?** → the "think twice" section above.
-5. **A new tool?** → `edt-mcp-new-tool`.
+3. **Writing or cutting a tool's description / parameter prose?** → `edt-mcp-tool-descriptions`. Every sentence in `tools/list` is paid on every request; the capability index can go, the protocol clause cannot, and "move it to the guide" deletes the behaviour rather than relocating it. A/B it through `tests/tool-choice/` before shipping.
+4. **Is this bilingual?** → `edt-mcp-bilingual`.
+5. **God-class / cascade / mirror feature?** → the "think twice" section above.
+6. **A new tool?** → `edt-mcp-new-tool`.
 
 ---
 
-## 🧪 The testing cycle (three tiers — know which one proves what)
+## 🧪 The testing cycle (four tiers — know which one proves what)
 
 Each tier proves a different layer. A green lower tier does NOT prove the higher one. Do not claim "done" by review/grep alone.
 
-**Tier 1 — compile + unit tests (Java logic + ratchets).**
-- One command, same as CI: `bash source/compile.sh` (add `--skip-tests` to skip Surefire).
-- The toolchain is **not on `PATH`** — pass it: `bash source/compile.sh --java-home "<JDK17 home>" --maven-home "<maven home>"`. CI runs `mvn clean verify --batch-mode -T 1C` in `mcp/` on JDK 17.
-- **First build is slow** (Tycho pulls the EDT p2 repo + Eclipse SDK, hundreds of MB); ~1 min once `~/.m2/repository/p2` + `.cache/tycho` are warm. No caches + no network ⇒ it legitimately can't run — say so, don't fake green.
-- Unit tests need the target platform (Mockito/JUnit come from the p2 target). A green `compile.sh` is the real proof for Java changes. Ratchets that fail the build: `BuiltInToolTestCoverageTest` (every tool has an `XxxToolTest`), `ToolContractConsistencyTest` (lowerCamelCase params), the e2e coverage ratchet.
+- **Tier 1 — compile + unit tests.** `bash source/compile.sh` (the same flow as CI). Proves Java logic and the build ratchets: `BuiltInToolTestCoverageTest` (every tool has an `XxxToolTest`), `ToolContractConsistencyTest` (lowerCamelCase params), the e2e coverage ratchet. Mechanics + the toolchain/cache gotchas: `edt-mcp-build-test`.
+- **Tier 2 — live redeploy.** The ONLY proof of a tool's schema/description/response/behaviour, and of the MCP wire contract. Run against a non-elevated COPY of EDT, never the `Program Files` install. Mechanics: `edt-mcp-testing` + `edt-mcp-build-test`; the anti-stale jar check: `edt-mcp-ready-to-deploy`.
+- **Tier 3 — automated black-box e2e (`tests/e2e/`).** Real MCP client → live server → asserts the real effect. The formatter/synonym and error-shape contracts are **e2e-only** — they stay "verify in EDT". Mechanics: `edt-mcp-e2e-testing`.
+- **Tier 4 — protocol conformance.** Validates the SERVER against the MCP wire spec; `tests/conformance/baseline.yml` pins the intentional gaps, so a new failure = a protocol regression. Mechanics: `edt-mcp-build-test`.
 
-**Tier 2 — live redeploy loop (runtime behaviour + `tools/list` schema + MCP wire contract).** Only this proves anything a tool's schema/description/response/behaviour. Encapsulated in a redeploy script (e.g. `edt-redeploy.ps1`; paths are environment-specific — do NOT hardcode them into committed files).
-- **Test against a non-elevated COPY of EDT**, never the `Program Files` install (elevated → swap/relaunch triggers UAC). Copy EDT once into a writable folder + a dedicated workspace.
-- **Per change:** `compile.sh` → **kill EDT** (`taskkill /IM 1cedt.exe /T /F`; also `1cv8.exe` if an infobase runs) → **swap** the freshly built bundle jar into `<edt-copy>/plugins/` AND patch `configuration/org.eclipse.equinox.simpleconfigurator/bundles.info` (Tycho stamps a new qualifier each build → the jar filename changes) → **relaunch with `-clean`** (forces OSGi reload) → wait for `:8765` → run live checks → kill EDT (and the infobase) when done.
-- **The redeploy script exits 1 even on success** — the real signal is the log line `MCP server UP on 8765`. Don't treat exit 1 as failure.
-- **Redeploy WITHOUT a `-Build` flag only swaps the LAST built jar** — run `compile.sh` first (or pass `-Build`), else you ship stale code.
-- **Tycho p2 qualifier collision is real:** two builds can produce the SAME qualifier, and p2 then ships a STALE cached jar despite fresh compilation. **Verify the DEPLOYED jar contains your change** — `unzip -p <jar> path/To/Class.class | grep <new-literal>` (a plain `grep` on the `.jar` is useless — it's a compressed zip). If stale: **commit first** (changes the jgit qualifier) then rebuild, or clear the tycho/p2 cache.
-- **If EDT wedges** (project stuck `building`, `clean_project` never returns, a per-test TIMEOUT): kill + `-clean` relaunch autonomously, then wait for projects `ready` before a full run.
-- **Inspect payloads with `Invoke-RestMethod`** (PowerShell), not `curl` (curl mangles nested JSON). JSON-responseType tools put data in `result.structuredContent`; `content[0].text` is just a `Done`/`Error` placeholder.
-- **Infobase-dependent tools** (debug / run / YAXUnit / profiling): start the infobase (or a `debug_launch`) first; terminate it + EDT when done.
-
-**Tier 3 — automated black-box e2e (`tests/e2e/`).** Real MCP client → live server → asserts the real effect. One `test_<tool>.py` per tool; git-fixture isolation; happy + negative + error-quality; anti-cheat; a coverage ratchet fails the suite if a tool has none. Run: `python tests/e2e/run_all.py --project TestConfiguration` (needs a live `:8765`). Read `edt-mcp-e2e-testing` (full guide `tests/e2e/SKILL.md`) before adding/editing a test. The formatter/synonym and error-shape contracts are **e2e-only** — they stay "verify in EDT".
-
-**Tier 4 — protocol conformance.** The official `modelcontextprotocol/conformance` suite validates the SERVER against the MCP wire spec (handshake, capabilities, session-id, `isError`, `ping`, SSE) — a separate layer from the e2e business-logic gate. `tests/conformance/` holds `baseline.yml` (the pinned intentional gaps) + `README.md` (the layer split). Run: `npx @modelcontextprotocol/conformance@latest server --url http://127.0.0.1:8765/mcp --spec-version 2025-11-25 --expected-failures tests/conformance/baseline.yml` → green when only the pinned gaps fail; a new failure = a protocol regression. CI: `.github/workflows/conformance.yml` (needs a self-hosted runner with EDT).
+> **A green suite is NOT the whole verdict — read the EDT log afterwards.** `<workspace>/.metadata/.log` (plus the rotated `.bak_*.log`; the file rotates at ~1 MB, so a run spans several). Aggregate by severity and by exception type rather than skimming, e.g.
+> `cat .bak_*.log .log | grep -A1 "^!ENTRY .* 4 " | grep "^!MESSAGE" | sort | uniq -c | sort -rn`.
+> A tool can return a perfectly good answer while logging a stack trace, so failures hide here that no assertion catches: a `catch (Exception)` around reflection that swallows a platform API change and degrades to an empty result, an unattached-BM-object throw, a silent fallback. That is exactly how `TextSearcher`'s constructor change went unnoticed while every rename test stayed green. Triage each entry into: OURS-real (fix), OURS-noise (a validation refusal must not be logged at ERROR — demote it), or PLATFORM (record it and move on).
 
 **Mandatory test minimum for a change:**
 - Changed metadata/code resolution → a test for **both** languages (English `Name`, Russian `Name`, synonym). Reference: `WriteModuleSourceToolTest.testResolveRussianObjectName`.
@@ -114,6 +92,11 @@ Each tier proves a different layer. A green lower tier does NOT prove the higher
 - **No drive-by "tidy everything" edits.** The refactor proceeds one topic at a time.
 - **Destructive actions** (metadata rename/delete, `update_database`, `delete_project`) — only on an explicit request.
 - **Commits are local by default** — don't push autonomously; on the default branch, branch first. Review every commit before making it.
+- **Open every PR as a DRAFT, and flip it to ready ONLY when it is actually mergeable.** `gh pr create --draft` (an already-open one: `gh pr ready --undo`). Draft means "do not merge yet": the full gate is not green, a reviewer finding is unanswered, or CI is still running. Mark it ready (`gh pr ready`) only once the whole `edt-mcp-ready-to-deploy` gate has passed, every review thread is answered, and CI is green — that flip is the signal the PR may be merged. A non-draft PR that still has work pending invites a merge of unfinished work.
+- **Validating a PR = answering its comments, not just its code.** Every review comment and review thread gets a REPLY saying what was done (or why it was declined) — silence reads as "ignored". A thread whose point is actually fixed in the branch is then RESOLVED; a thread you disagreed with, deferred, or only partly addressed stays OPEN with the reason stated, so the author decides. Never resolve a thread you did not act on, and never resolve one by pushing a commit without replying. `gh pr view <n> --json reviews,comments` and `gh api .../pulls/<n>/comments` list them. The two single-comment endpoints are MIRRORED, and each 404s in the other's form: **reply** → `repos/<o>/<r>/pulls/<n>/comments/<id>/replies`, **read one** → `repos/<o>/<r>/pulls/comments/<id>` (no `<n>`). A thread is resolved through `gh api graphql` (`resolveReviewThread`), which needs the thread id from a `reviewThreads` query — `gh pr` alone cannot resolve.
+- **Ask the PR reviewer for a review, aimed, in ONE SENTENCE.** After opening a PR and after each round of fixes, comment `@codex review` plus a single sentence naming the riskiest spot to attack — no essays, no lists, no recap of what you already verified. A blind "please review" spends the pass on style; a long brief buries the aim. One pointed sentence has repeatedly found real defects here, including a fix that silently disabled itself. Then answer and resolve every comment per the rule above, and re-trigger after the fixes.
+- **A reviewer finding is a lead, not a verdict — check its work.** Its findings have been right about real bugs AND wrong about a "limitation" that the platform grammar disproved. Reproduce every claim against the code or EDT's sources before acting on it, and say in the reply what you checked; never fix on the reviewer's word alone, and never dismiss on your own. Wrong findings get a reasoned decline, not a silent one.
+- **An open PR of yours must be SUBSCRIBED to.** As soon as you open or push to one, start a background watch on it and keep it running: report new review comments, new PR comments, and each CI verdict as they land, instead of polling by hand or discovering them a turn later. Unsubscribe on exactly two events — the PR is MERGED/CLOSED, or the user asks you to stop. A watch left unarmed is how a reviewer's finding sits unanswered.
 
 ---
 

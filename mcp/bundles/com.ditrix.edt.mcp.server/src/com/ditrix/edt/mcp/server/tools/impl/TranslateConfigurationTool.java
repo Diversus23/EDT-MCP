@@ -64,13 +64,11 @@ public class TranslateConfigurationTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Run EDT 'Translate configuration' on a configuration project - " //$NON-NLS-1$
-             + "reads the dictionaries from the storages bound to it (external " //$NON-NLS-1$
-             + "dictionary storage projects with the dependentProjectNature, or " //$NON-NLS-1$
-             + "in-configuration storages) and regenerates the translated " //$NON-NLS-1$
-             + "artifacts. Equivalent of the context-menu action " //$NON-NLS-1$
-             + "Translation -> Translate configuration. " //$NON-NLS-1$
-             + "Requires LanguageTool installed in EDT."; //$NON-NLS-1$
+        return "SYNCHRONIZE a 1C configuration's translated artifacts with the target languages. Does " //$NON-NLS-1$
+            + "NOT translate anything itself: it regenerates the artifacts from translations ALREADY " //$NON-NLS-1$
+            + "present in the bound dictionary storages, so text absent from the dictionaries stays " //$NON-NLS-1$
+            + "untranslated - fill the dictionaries first (generate_translation_strings). Parameters " //$NON-NLS-1$
+            + "and examples: get_tool_guide('translate_configuration')."; //$NON-NLS-1$
     }
 
     @Override
@@ -105,6 +103,8 @@ public class TranslateConfigurationTool implements IMcpTool
             return ToolResult.error("targetLanguages is required (e.g. [\"en\"])").toJson(); //$NON-NLS-1$
         }
 
+        boolean mutationApiEntered = false;
+        boolean mutationApiReturned = false;
         try
         {
             // Resolve the IProject first so AI clients get the most specific
@@ -148,7 +148,9 @@ public class TranslateConfigurationTool implements IMcpTool
             // ISynchronizeProjectApi.synchronizeProject(IDtProject, List<String> languages)
             Method method = api.getClass().getMethod("synchronizeProject", //$NON-NLS-1$
                 IDtProject.class, List.class);
+            mutationApiEntered = true;
             method.invoke(api, dtProject, targetLanguages);
+            mutationApiReturned = true;
 
             BuildUtils.waitForDerivedData(project);
 
@@ -161,7 +163,13 @@ public class TranslateConfigurationTool implements IMcpTool
         }
         catch (Exception e)
         {
-            return CliReflectionErrors.toErrorJson(e, "Translate configuration", "LanguageTool"); //$NON-NLS-1$ //$NON-NLS-2$
+            String error = CliReflectionErrors.toErrorJson(e,
+                "Translate configuration", "LanguageTool"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (mutationApiReturned)
+            {
+                return ToolResult.markErrorAfterMutation(error);
+            }
+            return mutationApiEntered ? ToolResult.markErrorWithUnknownMutationOutcome(error) : error;
         }
     }
 }

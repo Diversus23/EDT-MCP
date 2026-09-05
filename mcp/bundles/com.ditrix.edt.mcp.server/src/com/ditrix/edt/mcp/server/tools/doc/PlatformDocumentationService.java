@@ -80,6 +80,18 @@ public class PlatformDocumentationService
         return rendered.substring("Error:".length()).trim(); //$NON-NLS-1$
     }
 
+    /**
+     * Description user-data key naming the platform TYPE that documents a metadata TYPE SET
+     * ({@code CatalogObject} -> {@code CatalogObjectCatalogName}). Mirrors
+     * {@code com._1c.g5.v8.dt.platform.type.MdTypeSetLoader.CONTAINS_TYPE}; the constant itself is
+     * not bound because its package is not among this bundle's imports, while the KEY is the stable
+     * contract the provider publishes on every metadata type-set description. Issue #355.
+     */
+    private static final String USER_DATA_CONTAINS_TYPE = "containsType"; //$NON-NLS-1$
+
+    /** Description user-data key carrying the Russian name of a platform type / type set. */
+    private static final String USER_DATA_RU_NAME = "ru_name"; //$NON-NLS-1$
+
     /** Member type constants */
     private static final String MEMBER_ALL = "all"; //$NON-NLS-1$
     private static final String MEMBER_METHOD = "method"; //$NON-NLS-1$
@@ -93,8 +105,9 @@ public class PlatformDocumentationService
     /**
      * Gets documentation for a platform type (ValueTable, Array, etc.).
      */
-    public String getTypeDocumentation(String typeName, String memberName, String memberType,
-                                        String projectName, int limit, boolean useRussian)
+    public String getTypeDocumentation(String typeName, String memberName, String memberType, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+                                        String projectName, int limit, boolean useRussian,
+                                        boolean detailed)
     {
         AtomicReference<String> resultRef = new AtomicReference<>();
 
@@ -103,7 +116,7 @@ public class PlatformDocumentationService
             try
             {
                 String result = getTypeDocumentationInternal(typeName, memberName, memberType,
-                                                              projectName, limit, useRussian);
+                                                              projectName, limit, useRussian, detailed);
                 resultRef.set(result);
             }
             catch (Exception e)
@@ -119,8 +132,9 @@ public class PlatformDocumentationService
     /**
      * Internal implementation that runs on UI thread.
      */
-    private String getTypeDocumentationInternal(String typeName, String memberName, String memberType,
-                                                 String projectName, int limit, boolean useRussian)
+    private String getTypeDocumentationInternal(String typeName, String memberName, String memberType, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+                                                 String projectName, int limit, boolean useRussian,
+                                                 boolean detailed)
     {
         // Get version for type provider
         Version version = getProjectVersion(projectName);
@@ -138,18 +152,60 @@ public class PlatformDocumentationService
             return ToolResult.error("Could not get type provider. Make sure EDT workspace is open.").toJson(); //$NON-NLS-1$
         }
 
-        // Find type by iterating through all type descriptions
-        List<String> availableTypes = new ArrayList<>();
-        Type foundType = findType(typeProvider, typeName, availableTypes);
+        // Find type by iterating through all type descriptions. The index re-checks each name it is
+        // about to PRINT by actually resolving it, so the banner cannot advertise a name that then
+        // fails - the loop issue #355 is about.
+        IEObjectProvider provider = typeProvider;
+        PlatformNameIndex index =
+            new PlatformNameIndex(typeName, candidate -> resolvesAsType(provider, candidate));
+        DocumentedType foundType = findType(typeProvider, typeName, index);
 
         // If not found, show available types
         if (foundType == null)
         {
-            return buildNotFoundBanner("Type not found: ", typeName, "types", availableTypes); //$NON-NLS-1$ //$NON-NLS-2$
+            return buildTypeNotFoundBanner(typeName, index);
         }
 
         // Build documentation from resolved Type
-        return buildTypeDocumentation(foundType, memberName, memberType, limit, useRussian);
+        return buildTypeDocumentation(foundType, version, memberName, memberType, limit, useRussian,
+            detailed);
+    }
+
+    /**
+     * The soft banner for a type lookup that resolved nothing. Three different failures, three
+     * different answers - telling a caller a name does not exist when the platform KNOWS it is a
+     * different, wrong answer, and it is what sent agents round a loop of equivalent retries in
+     * issue #355. The mirror-image mistake matters just as much: declaring "the platform documents
+     * nothing for it" over a set whose target we merely failed to reach states a fact about the
+     * platform that is not in evidence, and buries a condition a retry could clear.
+     *
+     * @param typeName the name that was looked up
+     * @param index the names the scan collected
+     * @return the rendered banner
+     */
+    private String buildTypeNotFoundBanner(String typeName, PlatformNameIndex index)
+    {
+        switch (index.missReason())
+        {
+        case DOCUMENTS_NOTHING:
+            return index.buildNotFoundBanner("No documentation for type set: ", typeName, "types", //$NON-NLS-1$ //$NON-NLS-2$
+                "A TYPE SET unions other types and declares no members of its own, so the platform " //$NON-NLS-1$
+                    + "documents nothing for it. Ask for one of the type sets it unions " //$NON-NLS-1$
+                    + "(CatalogRef, DocumentRef, EnumRef, ...) or for the concrete platform type."); //$NON-NLS-1$
+        case TARGET_UNRESOLVED:
+            return index.buildNotFoundBanner("Documentation unavailable for type set: ", typeName, //$NON-NLS-1$
+                "types", //$NON-NLS-1$
+                "The platform publishes this type set and names the generic type that documents it, " //$NON-NLS-1$
+                    + "but that type could not be resolved in this platform version's model - which " //$NON-NLS-1$
+                    + "usually means the model is not fully loaded yet. Retry; if it persists, ask " //$NON-NLS-1$
+                    + "for the concrete platform type instead."); //$NON-NLS-1$
+        default:
+            return index.buildNotFoundBanner("Type not found: ", typeName, "types", //$NON-NLS-1$ //$NON-NLS-2$
+                "Names are matched exactly (case-insensitive) against the platform type names, in " //$NON-NLS-1$
+                    + "English or Russian. An object of your own configuration is not a platform " //$NON-NLS-1$
+                    + "type - use get_metadata_details for that; for a global built-in function " //$NON-NLS-1$
+                    + "pass category='builtin'."); //$NON-NLS-1$
+        }
     }
 
     /**
@@ -187,14 +243,41 @@ public class PlatformDocumentationService
     }
 
     /**
-     * Iterates the provider's descriptions looking for {@code typeName} (case-insensitive, matching
-     * either the full qualified name or its last segment), collecting up to the first 30 names into
-     * {@code availableTypes} for the not-found banner.
-     *
-     * @param availableTypes out-param populated with up to 30 candidate names, in iteration order
-     * @return the resolved (non-proxy) {@link Type}, or {@code null} when not found
+     * A resolved documentation target: the platform {@link Type} whose members are rendered and,
+     * when the caller named a metadata TYPE SET, how it was reached.
      */
-    private Type findType(IEObjectProvider typeProvider, String typeName, List<String> availableTypes)
+    private static final class DocumentedType
+    {
+        /** The type the documentation is built from. */
+        final Type type;
+
+        /** The type set the caller named ({@code "CatalogObject / СправочникОбъект"}), or {@code null}. */
+        final String typeSetLabel;
+
+        /**
+         * The name the SYNTAX HELPER is asked with. For a type set that is the set's name, because
+         * the help documents it under the set ({@code CatalogObject.<Catalog name>}) rather than
+         * under the generic type the model resolves to. {@code null} => use the type's own name.
+         */
+        final String helpName;
+
+        DocumentedType(Type type, String typeSetLabel, String helpName)
+        {
+            this.type = type;
+            this.typeSetLabel = typeSetLabel;
+            this.helpName = helpName;
+        }
+    }
+
+    /**
+     * Iterates the provider's descriptions looking for {@code typeName} (case-insensitive, matching
+     * either the full qualified name or its last segment), feeding every name it does not match into
+     * {@code index} for the not-found banner.
+     *
+     * @param index collects the RESOLVABLE names seen, for the not-found banner
+     * @return the resolved documentation target, or {@code null} when not found
+     */
+    private DocumentedType findType(IEObjectProvider typeProvider, String typeName, PlatformNameIndex index)
     {
         Iterable<IEObjectDescription> descriptions = typeProvider.getEObjectDescriptions(null);
         if (descriptions == null)
@@ -206,25 +289,309 @@ public class PlatformDocumentationService
             // Get last segment of qualified name (e.g., "DocumentRef" from "some.package.DocumentRef")
             String fullName = desc.getName().toString();
             String lastSegment = desc.getName().getLastSegment();
-
-            // Collect first 30 types for debugging (show full name)
-            if (availableTypes.size() < 30)
-            {
-                availableTypes.add(lastSegment != null ? lastSegment : fullName);
-            }
+            String name = lastSegment != null ? lastSegment : fullName;
 
             // Check if this is the type we're looking for (case-insensitive, check both full and last segment) // NOSONAR explanatory comment, not commented-out code
-            if (fullName.equalsIgnoreCase(typeName) ||
-                (lastSegment != null && lastSegment.equalsIgnoreCase(typeName)))
+            boolean matches = fullName.equalsIgnoreCase(typeName) || name.equalsIgnoreCase(typeName);
+
+            if (!isDocumentable(typeProvider, desc))
             {
-                Type resolvedType = resolveDescriptionAsType(desc);
-                if (resolvedType != null)
+                // Deliberately NOT offered as an available name: it answers nothing. When it IS what
+                // was asked for, say so precisely instead of "not found" (issue #355) - and split
+                // the two ways a set can get here, because they are not the same news. A set that
+                // names NO target documents nothing and never will; a set that names one the
+                // provider does not currently hold is a model that may simply not be loaded yet,
+                // and telling that caller "the platform documents nothing for it" would be a claim
+                // about the platform made from our own failure to find something. The bilingual
+                // trap sits right here: containsType lives on the ENGLISH description, so a Russian
+                // one is silent about it either way - namesNoTarget is what separates "read it, it
+                // names nothing" from "never got to read it".
+                if (matches)
                 {
-                    return resolvedType;
+                    if (namesNoTarget(typeProvider, desc))
+                    {
+                        index.markDocumentsNothing();
+                    }
+                    else
+                    {
+                        index.markTargetUnresolved();
+                    }
                 }
+                continue;
+            }
+            if (matches)
+            {
+                DocumentedType resolved = resolveDocumentedType(typeProvider, desc, name);
+                if (resolved != null)
+                {
+                    return resolved;
+                }
+                // Matched and yet resolved nothing. Whatever the reason, this name does not answer,
+                // so it must not come back as an "available" one - that is the loop, exactly.
+                //
+                // A TYPE SET that got this far passed the cheap "its target is registered" test and
+                // still failed to resolve - the registered-vs-resolved distinction again, one level
+                // up. Answering a plain "Type not found" for a name the platform demonstrably knows
+                // is the wrong diagnosis; so is "the platform documents nothing for it", because it
+                // named a target and we simply could not reach it. It gets its own answer.
+                if (McorePackage.Literals.TYPE_SET.equals(desc.getEClass()))
+                {
+                    index.markTargetUnresolved();
+                }
+                continue;
+            }
+            index.accept(name);
+        }
+        return null;
+    }
+
+    /**
+     * Whether {@code name} really answers a type lookup - the same resolution the tool would run for
+     * it, so a name that passes this is a name the caller can copy out of the banner and query.
+     * Applied only to the handful of names about to be printed.
+     *
+     * @param provider the type provider
+     * @param name the candidate name, exactly as it would be passed back
+     * @return {@code true} when the lookup resolves
+     */
+    private boolean resolvesAsType(IEObjectProvider provider, String name)
+    {
+        IEObjectDescription desc = provider.getEObjectDescription(name);
+        return desc != null && resolveDocumentedType(provider, desc, name) != null;
+    }
+
+    /**
+     * Whether a description names something this tool can render documentation for. Only a TYPE SET
+     * with no generic type behind it is refused - a set that unions other types and declares no
+     * members of its own ({@code AnyRef} / {@code ЛюбаяСсылка}). Everything else is accepted,
+     * including any description whose {@code EClass} an EDT version reports differently: a wrong
+     * "documentable" costs one honest "not found", while a wrong refusal would silently hide the
+     * whole vocabulary.
+     *
+     * @param provider the provider the description came from
+     * @param desc the provider description
+     * @return {@code true} when the name can answer a documentation lookup
+     */
+    private static boolean isDocumentable(IEObjectProvider provider, IEObjectDescription desc)
+    {
+        if (!McorePackage.Literals.TYPE_SET.equals(desc.getEClass()))
+        {
+            return true;
+        }
+        return !documentedTypeDescriptions(provider, desc).isEmpty();
+    }
+
+    /**
+     * The descriptions of the generic types that document a TYPE SET - the ones
+     * {@link #containedTypeName} names, looked UP in the provider so the set is advertised only when
+     * its target is really there.
+     *
+     * <p>A LIST, in declaration order, because {@code containsType} is a comma-separated field:
+     * returning only the first registered candidate would report a set as undocumented whenever
+     * that one fails to resolve while a later one would have. Callers that only need a yes/no take
+     * the emptiness; the caller that renders takes the first that actually RESOLVES.
+     *
+     * <p>Checking the name is non-blank is not enough: it is the platform's own table, and a version
+     * that renamed or dropped a generic type would have the set listed as available and then fail on
+     * query - the very loop this change removes. The check stays a map lookup plus an EClass test, so
+     * it costs nothing; deciding by an actual {@code EcoreUtil.resolve} is what would be unaffordable
+     * (thousands of platform resources loaded on the UI thread for one not-found answer), and is not
+     * needed - the provider registers a type only after its resource parsed at init.
+     *
+     * @param provider the provider the description came from
+     * @param desc the type-set description
+     * @return the target descriptions in declaration order, empty when the set documents nothing
+     */
+    private static List<IEObjectDescription> documentedTypeDescriptions(IEObjectProvider provider,
+        IEObjectDescription desc)
+    {
+        String contains = containedTypeName(provider, desc);
+        if (contains == null)
+        {
+            return List.of();
+        }
+        List<IEObjectDescription> targets = new ArrayList<>();
+        for (String candidate : contains.split(",")) //$NON-NLS-1$
+        {
+            String trimmed = candidate.trim();
+            if (trimmed.isEmpty())
+            {
+                continue;
+            }
+            IEObjectDescription target = provider.getEObjectDescription(trimmed);
+            if (target != null && !McorePackage.Literals.TYPE_SET.equals(target.getEClass()))
+            {
+                targets.add(target);
+            }
+        }
+        return targets;
+    }
+
+    /**
+     * The name of the generic platform type that documents a TYPE SET, or {@code null} when the
+     * platform documents none (a set that only unions other sets, e.g. {@code AnyRef}).
+     *
+     * <p>The provider registers a set under BOTH its names against the SAME resource URI, but hangs
+     * the metadata user data on the ENGLISH description only - the Russian one gets the plain
+     * script-variant map. Read straight, that made {@code CatalogObject} resolve while
+     * {@code СправочникОбъект} did not, which is exactly half of issue #355. The URI fragment carries
+     * the English name ({@code .../mdTypeSets#/CatalogObject}), so the Russian description finds its
+     * sibling through the provider instead of through a hand-maintained name table.
+     *
+     * @param provider the provider the description came from
+     * @param desc the type-set description
+     * @return the documented type's name, or {@code null}
+     */
+    private static String containedTypeName(IEObjectProvider provider, IEObjectDescription desc)
+    {
+        String contains = desc.getUserData(USER_DATA_CONTAINS_TYPE);
+        if (contains != null && !contains.isBlank())
+        {
+            return contains;
+        }
+        IEObjectDescription sibling = englishSibling(provider, desc);
+        contains = sibling != null ? sibling.getUserData(USER_DATA_CONTAINS_TYPE) : null;
+        return contains != null && !contains.isBlank() ? contains : null;
+    }
+
+    /**
+     * The description a type set is registered under with its ENGLISH name, reached from the URI
+     * fragment both spellings share. {@code null} when this description already IS the English one,
+     * or when the provider publishes no such fragment.
+     *
+     * @param provider the provider the description came from
+     * @param desc the type-set description
+     * @return the English sibling description, or {@code null}
+     */
+    private static IEObjectDescription englishSibling(IEObjectProvider provider, IEObjectDescription desc)
+    {
+        String name = englishName(desc);
+        if (name == null || name.equals(desc.getName().getLastSegment()))
+        {
+            return null;
+        }
+        return provider.getEObjectDescription(name);
+    }
+
+    /**
+     * The ENGLISH name a type-set description's URI fragment carries
+     * ({@code .../mdTypeSets#/CatalogObject}), or {@code null} when there is no usable fragment.
+     *
+     * @param desc the type-set description
+     * @return the English name, or {@code null}
+     */
+    private static String englishName(IEObjectDescription desc)
+    {
+        org.eclipse.emf.common.util.URI uri = desc.getEObjectURI();
+        String fragment = uri != null ? uri.fragment() : null;
+        if (fragment == null || fragment.isEmpty())
+        {
+            return null;
+        }
+        String name = fragment.startsWith("/") ? fragment.substring(1) : fragment; //$NON-NLS-1$
+        return name.isEmpty() ? null : name;
+    }
+
+    /**
+     * Whether the absence of a {@code containsType} is a statement about the PLATFORM rather than
+     * about our own reach - i.e. whether the description that carries the field was actually read.
+     *
+     * <p>The field lives on the ENGLISH description only. So a Russian one that named no target may
+     * mean the set documents nothing ({@code ЛюбаяСсылка}), or merely that its English sibling was
+     * out of reach - a missing URI fragment, a provider that does not currently hold it. Those two
+     * deserve opposite answers ("never retry" vs "retry"), and telling them apart is only possible
+     * here, where it is known WHY the lookup came back empty.
+     *
+     * @param provider the provider the description came from
+     * @param desc the type-set description
+     * @return {@code true} when the authoritative description was read and simply named no target
+     */
+    private static boolean namesNoTarget(IEObjectProvider provider, IEObjectDescription desc)
+    {
+        if (containedTypeName(provider, desc) != null)
+        {
+            return false;
+        }
+        if (desc.getUserData(USER_DATA_CONTAINS_TYPE) != null)
+        {
+            // It carries the field itself (blank), so it IS the authoritative word on the matter.
+            return true;
+        }
+        String name = englishName(desc);
+        if (name == null)
+        {
+            return false;
+        }
+        // A fragment naming THIS description means it already is the English one - nothing to
+        // fetch, and its silence is the platform's own answer.
+        return name.equals(desc.getName().getLastSegment()) || provider.getEObjectDescription(name) != null;
+    }
+
+    /**
+     * Resolves a matched description to the {@link Type} whose members are rendered.
+     *
+     * <p>Straightforward for a platform type (Array, ValueTable). A METADATA TYPE SET
+     * ({@code CatalogObject} / {@code СправочникОбъект}, {@code DocumentRef}, {@code EnumRef}, ...)
+     * is a {@code TypeSet} rather than a {@code Type} and carries no members at all, so the old
+     * lookup rejected it and reported "not found" for a name it had itself just listed as available
+     * (issue #355). The platform keeps the common API of such a set on a GENERIC type -
+     * {@code CatalogObject} -> {@code CatalogObjectCatalogName}, the {@code Записать()} /
+     * {@code ПолучитьОбъект()} members - and names that type in the description's user data, so one
+     * more lookup in the SAME provider reaches it. No proxy games and no resource set: exactly the
+     * mechanism that already resolves {@code ValueTable}.
+     *
+     * @param provider the provider the description came from (used for the second lookup)
+     * @param desc the matched description
+     * @param matchedName the name as the caller spelled it, for the rendered type-set label
+     * @return the documentation target, or {@code null} when nothing resolves
+     */
+    private DocumentedType resolveDocumentedType(IEObjectProvider provider, IEObjectDescription desc,
+        String matchedName)
+    {
+        Type direct = resolveDescriptionAsType(desc);
+        if (direct != null)
+        {
+            return new DocumentedType(direct, null, null);
+        }
+        // Every candidate gets a turn: the first REGISTERED one is not necessarily the first that
+        // resolves, and stopping at it would report a set as undocumented while a later candidate
+        // would have answered.
+        for (IEObjectDescription target : documentedTypeDescriptions(provider, desc))
+        {
+            Type resolved = resolveDescriptionAsType(target);
+            if (resolved != null)
+            {
+                return new DocumentedType(resolved, typeSetLabel(provider, desc, matchedName), matchedName);
             }
         }
         return null;
+    }
+
+    /**
+     * The bilingual label of the type set the caller named. The English description carries the
+     * Russian name in its user data; the Russian one carries no counterpart, so its English half is
+     * taken from the sibling the two share a URI with. Nothing is invented for a name the provider
+     * does not publish.
+     *
+     * @param provider the provider the description came from
+     * @param desc the matched type-set description
+     * @param matchedName the name as it was matched
+     * @return the label to render
+     */
+    private static String typeSetLabel(IEObjectProvider provider, IEObjectDescription desc,
+        String matchedName)
+    {
+        String altName = desc.getUserData(USER_DATA_RU_NAME);
+        if (altName == null || altName.isBlank())
+        {
+            IEObjectDescription sibling = englishSibling(provider, desc);
+            altName = sibling != null ? sibling.getName().getLastSegment() : null;
+        }
+        if (altName == null || altName.isBlank() || altName.equalsIgnoreCase(matchedName))
+        {
+            return matchedName;
+        }
+        return matchedName + " / " + altName; //$NON-NLS-1$
     }
 
     /**
@@ -267,57 +634,51 @@ public class PlatformDocumentationService
     }
 
     /**
-     * Builds the soft "not found" banner: an {@code "Error: <subject><name>"} line followed by the
-     * collected available items (or an empty-provider note / "more available" hint). The exact text
-     * matches the previous inline builders so {@link #isNotFoundBanner} still recognises it.
-     *
-     * @param subject the not-found phrase incl. trailing separator (e.g. {@code "Type not found: "})
-     * @param name the looked-up name appended after {@code subject}
-     * @param itemsLabel the plural noun used in the "Available &lt;itemsLabel&gt; (first N)" heading
-     * @param available the collected candidate names
-     * @return the rendered banner string
-     */
-    private String buildNotFoundBanner(String subject, String name, String itemsLabel, List<String> available)
-    {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Error: ").append(subject).append(name).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        sb.append("Available ").append(itemsLabel).append(" (first ").append(available.size()).append("):\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        for (String item : available)
-        {
-            sb.append("- ").append(item).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        if (available.isEmpty())
-        {
-            sb.append("(no ").append(itemsLabel).append(" found - provider may be empty)\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        else if (available.size() >= 30)
-        {
-            sb.append("... (more available)\n"); //$NON-NLS-1$
-        }
-        return sb.toString();
-    }
-
-    /**
      * Builds markdown documentation for a Type.
      */
-    private String buildTypeDocumentation(Type type, String memberName, String memberType,
-                                           int limit, boolean useRussian)
+    private String buildTypeDocumentation(DocumentedType documented, Version version, String memberName, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+                                           String memberType, int limit, boolean useRussian,
+                                           boolean detailed)
     {
+        Type type = documented.type;
         StringBuilder sb = new StringBuilder();
+        // The syntax helper carries what the model does not: the prose, and the return value of
+        // methods the model records none for. Unavailable => every lookup is null and the output is
+        // exactly the model-only one. Read ONLY for 'detailed': the concise rendering drops every
+        // description anyway, and each lookup walks the doc tree and parses a page on the UI thread -
+        // at limit 200 that is hundreds of page loads whose result is then thrown away. Issue #299.
+        PlatformHelpService help = detailed ? new PlatformHelpService(version, useRussian ? "ru" : "en") //$NON-NLS-1$ //$NON-NLS-2$
+            : PlatformHelpService.disabled();
+        String typeName = helpNameFor(documented, type, help);
 
         appendTypeHeader(sb, type, useRussian);
+        appendTypeSetLine(sb, documented.typeSetLabel);
+        appendDescription(sb, help.typeDescription(typeName));
         appendTypeInfo(sb, type);
         appendCollectionElementTypes(sb, type, useRussian);
 
         int count = 0;
-        count = appendConstructorsSection(sb, type, memberType, limit, count, useRussian);
+        // A system enumeration's VALUES are what a caller comes for; they are also the only thing it
+        // has - it is not constructible, so the "Constructors" section below is skipped for it
+        // (rendering an empty constructor under "Created by New: No" was self-contradicting). #299
+        if (type.isSysEnum())
+        {
+            count = appendSysEnumValuesSection(sb, type, version, memberName, memberType, limit, count,
+                useRussian);
+        }
+        else
+        {
+            count = appendConstructorsSection(sb, type, memberType, limit, count, useRussian);
+        }
 
         // Get context def for methods and properties
         ContextDef contextDef = type.getContextDef();
         if (contextDef != null)
         {
-            count = appendMethodsSection(sb, contextDef, memberName, memberType, limit, count, useRussian);
-            count = appendPropertiesSection(sb, contextDef, memberName, memberType, limit, count, useRussian);
+            count = appendMethodsSection(sb, contextDef, memberName, memberType, limit, count,
+                useRussian, help, typeName);
+            count = appendPropertiesSection(sb, contextDef, memberName, memberType, limit, count,
+                useRussian, help, typeName);
         }
 
         count = appendEventsSection(sb, type, memberName, memberType, limit, count, useRussian);
@@ -328,6 +689,21 @@ public class PlatformDocumentationService
         }
 
         return sb.toString();
+    }
+
+
+    /**
+     * Appends a documentation paragraph read from the syntax helper, when there is one. A blank or
+     * absent text renders nothing at all, so an EDT without the platform documentation produces the
+     * same output as before. Issue #299.
+     */
+    private static void appendDescription(StringBuilder sb, String description)
+    {
+        if (description == null || description.isBlank())
+        {
+            return;
+        }
+        sb.append(MarkdownUtils.escapeMarkdown(description.trim())).append("\n\n"); //$NON-NLS-1$
     }
 
     /**
@@ -344,6 +720,52 @@ public class PlatformDocumentationService
             sb.append(" / ").append(altName); //$NON-NLS-1$
         }
         sb.append("\n\n"); //$NON-NLS-1$
+    }
+
+    /**
+     * The name the SYNTAX HELPER is asked with, for the type's own description and for every
+     * member's.
+     *
+     * <p>A metadata TYPE SET is normally documented under the SET
+     * ({@code CatalogObject.<Catalog name>}), not under the generic type the model resolved to
+     * ({@code CatalogObjectCatalogName}) - so the set's name comes first. But not every set has a
+     * page: {@code Characteristic} has none while its generic type
+     * ({@code CharacteristicsDescription}) does, and committing to the set's name unconditionally
+     * silently dropped every description for it. So the set's name is used only when the helper
+     * actually documents it, and otherwise the resolved type answers as it always did. Issue #355.
+     *
+     * @param documented the resolved lookup target
+     * @param type the resolved platform type
+     * @param help the syntax-helper reader (a disabled one documents nothing, so CONCISE - which
+     *            reads no descriptions at all - simply keeps the model name)
+     * @return the name to ask the helper with
+     */
+    private static String helpNameFor(DocumentedType documented, Type type, PlatformHelpService help)
+    {
+        String modelName = type.getName() != null ? type.getName() : type.getNameRu();
+        if (documented.helpName == null)
+        {
+            return modelName;
+        }
+        return help.documents(documented.helpName) ? documented.helpName : modelName;
+    }
+
+    /**
+     * Names the TYPE SET the caller asked for, when the documentation was reached through one. Says
+     * plainly which name was resolved and what the rendered members are, so a caller is never left
+     * wondering why it asked for {@code СправочникОбъект} and got {@code CatalogObjectCatalogName}.
+     *
+     * @param sb the output buffer
+     * @param typeSetLabel the set's bilingual label, or {@code null} when the type was named directly
+     */
+    private static void appendTypeSetLine(StringBuilder sb, String typeSetLabel)
+    {
+        if (typeSetLabel == null)
+        {
+            return;
+        }
+        sb.append("**Type set:** ").append(MarkdownUtils.escapeMarkdown(typeSetLabel)) //$NON-NLS-1$
+            .append(" - the members below are the ones every type in this set carries.\n\n"); //$NON-NLS-1$
     }
 
     /**
@@ -385,6 +807,168 @@ public class PlatformDocumentationService
         sb.append(String.join(", ", typeNames)).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+
+    /**
+     * Appends the "Values" section of a SYSTEM ENUMERATION - the thing a caller actually needs from
+     * such a type and the one thing the type itself does not carry. Issue #299.
+     *
+     * <p>A system enumeration is modelled as TWO types: the one named after the enumeration (what a
+     * caller asks for, and what a variable is typed as) and a companion "manager" type whose
+     * PROPERTIES are the values. Only the second one holds them, and it is reachable through the
+     * GLOBAL CONTEXT property that carries the enumeration's name - the very thing BSL resolves when
+     * it sees {@code DateFractions.Date}. When that lookup fails the section is simply omitted: a
+     * missing section is better than a wrong one.
+     *
+     * @return the updated running item count
+     */
+    private int appendSysEnumValuesSection(StringBuilder sb, Type type, Version version, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+        String memberName, String memberType, int limit, int count, boolean useRussian)
+    {
+        if (!shouldIncludeMemberType(memberType, MEMBER_PROPERTY) && !MEMBER_ALL.equals(memberType))
+        {
+            return count;
+        }
+        List<Property> values;
+        try
+        {
+            values = findSysEnumValues(type, version);
+        }
+        catch (Exception e) // NOSONAR the values are an enrichment: an unresolvable proxy must not fail the whole lookup
+        {
+            // Without this the javadoc above ("the section is simply omitted") was a promise the
+            // code did not keep: the exception reached the outer handler and turned the WHOLE type
+            // lookup into an error.
+            Activator.logInfo("System enumeration values could not be read: " + e); //$NON-NLS-1$
+            return count;
+        }
+        if (values.isEmpty())
+        {
+            return count;
+        }
+        sb.append("## Values\n\n"); //$NON-NLS-1$
+        String enumName = useRussian && type.getNameRu() != null ? type.getNameRu() : type.getName();
+        for (Property value : values)
+        {
+            if (count >= limit)
+            {
+                break;
+            }
+            String valueName = useRussian && value.getNameRu() != null ? value.getNameRu() : value.getName();
+            if (!memberNameMatches(valueName, value.getName(), value.getNameRu(), memberName))
+            {
+                continue;
+            }
+            String altName = useRussian ? value.getName() : value.getNameRu();
+            sb.append("- `").append(enumName != null ? enumName : UNKNOWN_LABEL).append('.') //$NON-NLS-1$
+                .append(valueName != null ? valueName : UNKNOWN_LABEL).append('`'); //$NON-NLS-1$
+            if (altName != null && !altName.equals(valueName))
+            {
+                // The alternate identifier names the enumeration in the OTHER language too:
+                // a Russian rendering reads 'ЧастиДаты.Дата / DateFractions.Date', not the
+                // Russian enumeration name glued to the English value - which would be a
+                // hybrid that exists in neither language.
+                String altEnumName = useRussian ? type.getName() : type.getNameRu();
+                sb.append(" / `").append(altEnumName != null ? altEnumName : UNKNOWN_LABEL) //$NON-NLS-1$
+                    .append('.').append(altName).append('`'); //$NON-NLS-1$
+            }
+            sb.append('\n');
+            count++;
+        }
+        sb.append('\n');
+        return count;
+    }
+
+
+    /**
+     * The values of a system enumeration: the properties of the companion type reached through the
+     * global-context property named after the enumeration. Returns an empty list when the model does
+     * not expose it (never {@code null}) - the caller then omits the section. Issue #299.
+     */
+    private List<Property> findSysEnumValues(Type type, Version version)
+    {
+        String enName = type.getName();
+        String ruName = type.getNameRu();
+        if (enName == null && ruName == null)
+        {
+            return List.of();
+        }
+        IEObjectProvider propertyProvider =
+            IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.PROPERTY, version);
+        if (propertyProvider == null)
+        {
+            return List.of();
+        }
+        Iterable<IEObjectDescription> descriptions = propertyProvider.getEObjectDescriptions(null);
+        if (descriptions == null)
+        {
+            return List.of();
+        }
+        // The provider hands out PROXIES. Resolve them in the resource set the ALREADY-RESOLVED type
+        // lives in: that one holds the platform resources of THIS type's version, whereas a fresh,
+        // empty one resolves nothing. This is the whole reason the values looked absent.
+        //
+        // Deliberately no fallback to "any project's resource set": in a workspace holding projects
+        // on DIFFERENT platform versions that would resolve this version's proxies against another
+        // version's resources - wrong values are worse than none, so a type with no resource set
+        // simply reports no values.
+        ResourceSet resourceSet = type.eResource() != null ? type.eResource().getResourceSet() : null;
+        if (resourceSet == null)
+        {
+            return List.of();
+        }
+        for (IEObjectDescription desc : descriptions)
+        {
+            String lastSegment = desc.getName().getLastSegment();
+            if (lastSegment == null
+                || !lastSegment.equalsIgnoreCase(enName) && !lastSegment.equalsIgnoreCase(ruName))
+            {
+                continue;
+            }
+            List<Property> values = valuesOfEnumAccessProperty(desc, resourceSet);
+            if (!values.isEmpty())
+            {
+                return values;
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * Resolves a global-context property description to the properties of the type it is typed at -
+     * for an enumeration-access property those ARE the enumeration's values. Empty when the
+     * description does not resolve or carries no such type.
+     */
+    private List<Property> valuesOfEnumAccessProperty(IEObjectDescription desc, ResourceSet resourceSet)
+    {
+        EObject resolved = desc.getEObjectOrProxy();
+        if (resolved != null && resolved.eIsProxy() && resourceSet != null)
+        {
+            resolved = EcoreUtil.resolve(resolved, resourceSet);
+        }
+        if (!(resolved instanceof Property) || resolved.eIsProxy())
+        {
+            return List.of();
+        }
+        for (TypeItem typeItem : ((Property)resolved).getTypes())
+        {
+            if (!(typeItem instanceof Type))
+            {
+                continue;
+            }
+            ContextDef holder = ((Type)typeItem).getContextDef();
+            if (holder == null)
+            {
+                continue;
+            }
+            EList<Property> properties = holder.allProperties();
+            if (properties != null && !properties.isEmpty())
+            {
+                return new ArrayList<>(properties);
+            }
+        }
+        return List.of();
+    }
+
     /**
      * Appends the "Constructors" section, honoring the member-type filter and the
      * running item limit. Returns the updated running item count.
@@ -418,8 +1002,9 @@ public class PlatformDocumentationService
      * Appends the "Methods" section, honoring the member-name/type filters and the
      * running item limit. Returns the updated running item count.
      */
-    private int appendMethodsSection(StringBuilder sb, ContextDef contextDef, String memberName,
-                                     String memberType, int limit, int count, boolean useRussian)
+    private int appendMethodsSection(StringBuilder sb, ContextDef contextDef, String memberName, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+                                     String memberType, int limit, int count, boolean useRussian,
+                                     PlatformHelpService help, String typeName)
     {
         if (!shouldIncludeMemberType(memberType, MEMBER_METHOD))
         {
@@ -438,7 +1023,7 @@ public class PlatformDocumentationService
             String methodName = useRussian ? method.getNameRu() : method.getName();
             if (memberNameMatches(methodName, method.getName(), method.getNameRu(), memberName))
             {
-                appendMethodDocumentation(sb, method, useRussian);
+                appendMethodDocumentation(sb, method, useRussian, help, typeName);
                 count++;
             }
         }
@@ -450,8 +1035,9 @@ public class PlatformDocumentationService
      * Appends the "Properties" section, honoring the member-name/type filters and the
      * running item limit. Returns the updated running item count.
      */
-    private int appendPropertiesSection(StringBuilder sb, ContextDef contextDef, String memberName,
-                                        String memberType, int limit, int count, boolean useRussian)
+    private int appendPropertiesSection(StringBuilder sb, ContextDef contextDef, String memberName, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+                                        String memberType, int limit, int count, boolean useRussian,
+                                        PlatformHelpService help, String typeName)
     {
         if (!shouldIncludeMemberType(memberType, MEMBER_PROPERTY))
         {
@@ -470,7 +1056,7 @@ public class PlatformDocumentationService
             String propName = useRussian ? prop.getNameRu() : prop.getName();
             if (memberNameMatches(propName, prop.getName(), prop.getNameRu(), memberName))
             {
-                appendPropertyDocumentation(sb, prop, useRussian);
+                appendPropertyDocumentation(sb, prop, useRussian, help, typeName);
                 count++;
             }
         }
@@ -651,7 +1237,8 @@ public class PlatformDocumentationService
     /**
      * Appends method documentation.
      */
-    private void appendMethodDocumentation(StringBuilder sb, Method method, boolean useRussian)
+    private void appendMethodDocumentation(StringBuilder sb, Method method, boolean useRussian,
+        PlatformHelpService help, String typeName)
     {
         String name = useRussian && method.getNameRu() != null ? method.getNameRu() : method.getName();
         String altName = useRussian ? method.getName() : method.getNameRu();
@@ -668,16 +1255,32 @@ public class PlatformDocumentationService
         {
             sb.append("*Returns a value*\n\n"); //$NON-NLS-1$
         }
+        appendDescription(sb, help.memberDescription(typeName, method.getName()));
 
         // Parameter sets (overloads) - use getParamSet() not getParamSets()
         EList<ParamSet> paramSets = method.getParamSet();
         appendMethodParamSets(sb, paramSets, useRussian);
 
-        // Return type - on method level, not ParamSet
+        // What the method returns, from BOTH sources. The model carries the TYPE but records none at
+        // all for some methods; the syntax helper carries the platform's own wording, which also
+        // says what the value MEANS. Whichever exists is rendered - and when only the documentation
+        // has it, that is stated, so a caller can tell a modelled type from a documented sentence.
+        // A method the documentation describes as a procedure legitimately yields neither. #299
         EList<TypeItem> retValTypes = method.getRetValType();
+        String documentedReturn = help.methodReturnValue(typeName, method.getName());
         if (retValTypes != null && !retValTypes.isEmpty())
         {
-            sb.append("**Returns:** ").append(joinTypeNames(retValTypes, useRussian)).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            sb.append("\n**Returns:** ").append(joinTypeNames(retValTypes, useRussian)); //$NON-NLS-1$
+            if (documentedReturn != null)
+            {
+                sb.append(" - ").append(MarkdownUtils.escapeMarkdown(documentedReturn)); //$NON-NLS-1$
+            }
+            sb.append("\n"); //$NON-NLS-1$
+        }
+        else if (documentedReturn != null)
+        {
+            sb.append("\n**Returns (from the platform documentation):** ") //$NON-NLS-1$
+                .append(MarkdownUtils.escapeMarkdown(documentedReturn)).append("\n"); //$NON-NLS-1$
         }
 
         sb.append("\n"); //$NON-NLS-1$
@@ -779,7 +1382,8 @@ public class PlatformDocumentationService
     /**
      * Appends property documentation.
      */
-    private void appendPropertyDocumentation(StringBuilder sb, Property prop, boolean useRussian)
+    private void appendPropertyDocumentation(StringBuilder sb, Property prop, boolean useRussian,
+        PlatformHelpService help, String typeName)
     {
         String name = useRussian && prop.getNameRu() != null ? prop.getNameRu() : prop.getName();
         String altName = useRussian ? prop.getName() : prop.getNameRu();
@@ -805,6 +1409,7 @@ public class PlatformDocumentationService
         {
             sb.append("*Access: ").append(String.join("/", flags)).append("*\n\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
+        appendDescription(sb, help.memberDescription(typeName, prop.getName()));
 
         // Property type - use getTypes() which returns EList<TypeItem>
         EList<TypeItem> propTypes = prop.getTypes();
@@ -911,18 +1516,41 @@ public class PlatformDocumentationService
 
         ResourceSet resourceSet = findAnyProjectResourceSet();
 
-        // Search for the function
-        List<String> availableMethods = new ArrayList<>();
-        Method foundMethod = findBuiltinMethod(methodProvider, functionName, resourceSet, availableMethods);
+        // Search for the function. As on the type branch, each name the banner is about to print is
+        // re-checked by actually resolving it: the METHOD provider hands out proxies too, and a name
+        // that cannot resolve must not be advertised as available.
+        ResourceSet proxyContext = resourceSet;
+        PlatformNameIndex index = new PlatformNameIndex(functionName,
+            candidate -> resolvesAsBuiltin(methodProvider, candidate, proxyContext));
+        Method foundMethod = findBuiltinMethod(methodProvider, functionName, resourceSet, index);
 
         // If not found, show available methods
         if (foundMethod == null)
         {
-            return buildBuiltinNotFoundBanner(functionName, availableMethods);
+            return index.buildNotFoundBanner("Built-in function not found: ", functionName, //$NON-NLS-1$
+                "global methods", //$NON-NLS-1$
+                "Names are matched exactly (case-insensitive), in English or Russian. A method of a " //$NON-NLS-1$
+                    + "platform TYPE is not a global function - pass category='type' with the type's " //$NON-NLS-1$
+                    + "name and memberName instead."); //$NON-NLS-1$
         }
 
         // Build documentation for the found method
         return buildBuiltinMethodDocumentation(foundMethod, useRussian);
+    }
+
+    /**
+     * Whether {@code name} really answers a built-in lookup - the same resolution the tool would run
+     * for it. Applied only to the handful of names about to be printed.
+     *
+     * @param provider the global-method provider
+     * @param name the candidate name, exactly as it would be passed back
+     * @param resourceSet resource set used to resolve the proxy (may be {@code null})
+     * @return {@code true} when the lookup resolves
+     */
+    private boolean resolvesAsBuiltin(IEObjectProvider provider, String name, ResourceSet resourceSet)
+    {
+        IEObjectDescription desc = provider.getEObjectDescription(name);
+        return desc != null && resolveDescriptionAsMethod(desc, resourceSet) != null;
     }
 
     /**
@@ -951,15 +1579,15 @@ public class PlatformDocumentationService
 
     /**
      * Iterates the provider's descriptions looking for a global method named {@code functionName}
-     * (case-insensitive, by last segment), collecting up to the first 30 names into
-     * {@code availableMethods} for the not-found banner.
+     * (case-insensitive, by last segment), feeding the names it sees into {@code index} for the
+     * not-found banner.
      *
      * @param resourceSet resource set used to resolve a matched proxy (may be {@code null})
-     * @param availableMethods out-param populated with up to 30 candidate names, in iteration order
+     * @param index collects the names seen, for the not-found banner
      * @return the resolved (non-proxy) {@link Method}, or {@code null} when not found
      */
     private Method findBuiltinMethod(IEObjectProvider methodProvider, String functionName,
-                                     ResourceSet resourceSet, List<String> availableMethods)
+                                     ResourceSet resourceSet, PlatformNameIndex index)
     {
         Iterable<IEObjectDescription> descriptions = methodProvider.getEObjectDescriptions(null);
         if (descriptions == null)
@@ -974,12 +1602,6 @@ public class PlatformDocumentationService
                 methodName = desc.getName().toString();
             }
 
-            // Collect some methods for suggestions
-            if (availableMethods.size() < 30)
-            {
-                availableMethods.add(methodName);
-            }
-
             // Check if this is the function we're looking for (case-insensitive) // NOSONAR explanatory comment, not commented-out code
             if (methodName.equalsIgnoreCase(functionName))
             {
@@ -988,7 +1610,10 @@ public class PlatformDocumentationService
                 {
                     return resolvedMethod;
                 }
+                // Matched and resolved nothing: never offer the caller its own query back.
+                continue;
             }
+            index.accept(methodName);
         }
         return null;
     }
@@ -1025,35 +1650,6 @@ public class PlatformDocumentationService
             return (Method) resolved;
         }
         return null;
-    }
-
-    /**
-     * Builds the built-in-function not-found banner. Mirrors the previous inline text exactly: the
-     * heading reads "Available global methods" while the empty-provider note reads "(no methods
-     * found ...)", so it cannot reuse {@link #buildNotFoundBanner} (single label).
-     *
-     * @param functionName the looked-up function name
-     * @param available the collected candidate global-method names
-     * @return the rendered banner string
-     */
-    private String buildBuiltinNotFoundBanner(String functionName, List<String> available)
-    {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Error: Built-in function not found: ").append(functionName).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        sb.append("Available global methods (first ").append(available.size()).append("):\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        for (String availMethod : available)
-        {
-            sb.append("- ").append(availMethod).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        if (available.isEmpty())
-        {
-            sb.append("(no methods found - provider may be empty)\n"); //$NON-NLS-1$
-        }
-        else if (available.size() >= 30)
-        {
-            sb.append("... (more available)\n"); //$NON-NLS-1$
-        }
-        return sb.toString();
     }
 
     /**

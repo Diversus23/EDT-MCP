@@ -1,8 +1,10 @@
 # Map of EDT-MCP MCP-server tools
 
-> The source of truth is the "Available Tools" section in the EDT-MCP repository `README.md`. If it differs from this file — trust the README.
+> Current MCP help/schema and the generated `docs/tools/` inventory are the
+> source of truth. This copied task map is secondary.
 >
-> Total tools: **57**, organised into 9 groups.
+> This file is a curated task map, not an exhaustive capability index; it does
+> not carry a manually maintained total that can drift from the server.
 
 ## Tool name prefixes across clients
 
@@ -34,8 +36,8 @@ This section matters more than any table below. Use it to pick the right tool, t
 | "Validate a 1C query" | `validate_query` (DCS query -> `dcsMode: true`) | Before pasting a query text into code |
 | "What's in this form?" | `get_form_layout_snapshot` with `mode: compact` (YAML); `get_form_screenshot` for visuals | YAML is cheaper than PNG |
 | "What does the platform expose for type X?" | `get_platform_documentation` | Do not guess signatures |
-| "Run / debug / update an infobase" | `list_configurations` -> `debug_launch` / `update_database` | First learn the launch configuration name |
-| "Run tests" | `run_yaxunit_tests`; to debug failing ones — `debug_yaxunit_tests` + `set_breakpoint` | |
+| "Run / debug / update an infobase" | `list_configurations` -> `launch` / `update_database` | First learn the launch configuration name |
+| "Run tests" | `run_yaxunit_tests`; to debug failing ones — `set_breakpoint` then `run_yaxunit_tests(debug=true)` | |
 | "What does check Z mean?" | `get_check_description` | |
 
 If a tool returns `tool is disabled` — the current preset (see below) hides it. **Do not try to bypass**; tell the user and suggest switching the preset.
@@ -46,10 +48,10 @@ In plugin settings (`Window -> Preferences -> MCP Server -> Tools`) the user sel
 
 | Preset | What is disabled |
 |---|---|
-| **All Tools** | Nothing (all 57 tools) |
+| **All Tools** | Nothing (all currently enabled tools) |
 | **Analysis Only** | Groups Applications & Testing, Debugging, BSL Code, Refactoring, Translation + `export_configuration_to_xml` + `import_configuration_from_xml`. Available: Core/Project (except export/import), Errors & Problems, Code Intelligence, Tags |
 | **Code Review** | Same as Analysis Only, **plus** all BSL Code tools become available **except** `write_module_source`. So available: `read_method_source`, `read_module_source`, `get_module_structure`, `list_modules`, `search_in_code`, `get_method_call_hierarchy`, `go_to_definition`, `get_symbol_info`, `get_form_layout_snapshot`, `get_form_screenshot`, `validate_query` |
-| **Development** | Only the Debugging group (including `debug_yaxunit_tests`, `start_profiling`, `get_profiling_results`). Refactoring, Translation, BSL Code, Applications are all available |
+| **Development** | The Debugging group and default-off tools (currently raw `git` and `ask_workmate`). `run_yaxunit_tests` remains available from Applications for normal runs; although `debug=true` can start, its inspection and cleanup tools are disabled, so do not start a debug run until Debugging is enabled. Refactoring, Translation, BSL Code, and the remaining Applications tools are available |
 
 ## Configurable parameter defaults
 
@@ -84,7 +86,7 @@ In the settings UI some tools have configurable limit defaults (applied when the
 | Tool | Purpose | When to use |
 |---|---|---|
 | `get_problem_summary` | Problem counts by project and severity | **First** — gives the full picture in one call |
-| `get_project_errors` | Detailed errors. Filters: `projectName`, `severity` (ERRORS/BLOCKER/CRITICAL/MAJOR/MINOR/TRIVIAL), `checkId` (substring), `objects` (FQN array), `limit` (default 100, max 1000) | After the summary — for targeted investigation |
+| `get_project_errors` | Detailed errors. Filters: `projectName`, `severity` (ERRORS/BLOCKER/CRITICAL/MAJOR/MINOR/TRIVIAL), `checkId` (substring), `objects` (loose FQN-fragment array) OR `objectFqns` (exact addresses, reports `objectsNotFound` / `objectsUnsupported`; mutually exclusive with `objects`), `limit` (default 100, max 1000) | After the summary — for targeted investigation |
 | `get_markers` | Workspace markers — bookmarks and/or TODO/FIXME task markers. Filters: `markerKind` (`bookmark`/`task`; omit = both), `projectName`, `filePath`, `priority` (task-only) | On request or during a technical-debt audit |
 
 ### 3. Code Intelligence (7)
@@ -92,7 +94,7 @@ In the settings UI some tools have configurable limit defaults (applied when the
 | Tool | Purpose | When to use |
 |---|---|---|
 | `get_content_assist` | Completions at a code position (types, methods) | When working at a specific BSL position |
-| `get_platform_documentation` | Platform documentation (types, methods, properties, constructors) | When in doubt about a 1C platform signature |
+| `get_platform_documentation` | Platform documentation (types, methods, properties, constructors). A metadata TYPE SET (`CatalogObject`, `CatalogRef`, `DocumentObject`, `EnumRef`, ...) gives the API every catalog / document / register object shares | When in doubt about a 1C platform signature |
 | `get_metadata_objects` | List of configuration objects with filters `metadataType`, `nameFilter`, `limit` (default 100, max 1000), `language` | Object overview; **always** use a filter |
 | `get_metadata_details` | Detailed object properties by FQN array (`objectFqns: [...]`); FQNs may address members (e.g. `Catalog.Products.Attribute.Weight`). With `assignable: true` returns the assignable-property schema (per property: value kind, current value, allowed enum literals) | After finding the objects you need; use `assignable: true` to discover what `modify_metadata` can set and to what values |
 | `list_subsystems` | Subsystem tree (flat table, recursive by default) | Getting familiar with the configuration structure |
@@ -111,12 +113,12 @@ In the settings UI some tools have configurable limit defaults (applied when the
 | Tool | Purpose | When to use |
 |---|---|---|
 | `get_applications` | Project infobases with update state | For debugging/updating |
-| `list_configurations` | Launch configurations (runtime-client + Attach) with current running/suspended state | Before `debug_launch` |
+| `list_configurations` | Launch configurations (runtime-client + Attach) with current running/suspended state | Before `launch` |
 | `update_database` | Update an infobase. Two ways to identify: `launchConfigurationName` **or** `projectName + applicationId`. Mode full/incremental | On request |
-| `debug_launch` | Launch in debug mode. Same identification: `launchConfigurationName` (incl. Attach to 1C:Enterprise Debug Server) **or** `projectName + applicationId` | On request |
+| `launch` | Launch in debug (default) or run mode. Same identification: `launchConfigurationName` (incl. debug-only Attach) **or** `projectName + applicationId` | On request |
 | `run_yaxunit_tests` | Run YAxUnit tests, parse JUnit XML, Markdown report | After edits, if the project has tests |
 
-### 6. Debugging (12)
+### 6. Debugging (13 non-deprecated tools)
 
 | Tool | Purpose |
 |---|---|
@@ -125,12 +127,13 @@ In the settings UI some tools have configurable limit defaults (applied when the
 | `list_breakpoints` | Active breakpoints, optionally filtered by project |
 | `wait_for_break` | Blocking wait for suspend (e.g. breakpoint hit) |
 | `get_variables` | Read variables of a stack frame (lazy expand for nested) |
+| `set_variable` | Mutate a variable in a suspended stack frame when explicitly authorized |
 | `step` | Step over/into/out, returns a new snapshot |
 | `resume` | Resume a thread or all threads of a target |
 | `evaluate_expression` | Execute a BSL expression in frame context |
-| `debug_yaxunit_tests` | Run YAxUnit tests in DEBUG mode so breakpoints fire |
 | `debug_status` | Status of active debug launches: mode, suspend, threads, top frame |
-| `start_profiling` | Toggle performance profiling on the active debug target |
+| `start_profiling` | Start performance profiling on the active debug target; use `stop_profiling` to finish |
+| `stop_profiling` | Stop profiling on the selected active debug target |
 | `get_profiling_results` | Profiling results: per-module / per-line, call counts, timing, coverage |
 
 Typical cycle — see `edt-mcp-workflows.md`, section "Debugging".
@@ -156,7 +159,7 @@ Typical cycle — see `edt-mcp-workflows.md`, section "Debugging".
 
 | Tool | Purpose | When to use |
 |---|---|---|
-| `rename_metadata_object` | Rename with cascading update (BSL code, forms, metadata). Workflow: 1) call without `confirm` — preview all change points with indices; 2) (optional) `disableIndices: "2,3,5"` to skip specific changes; 3) `confirm: true`. `maxResults` (default 20, 0 = no limit) caps the preview. Russian FQNs are supported | **Only** this way to rename; manual XML editing is dangerous. `modify_metadata` does **not** rename |
+| `rename_metadata_object` | Rename an object, a member **or** a managed-form element (`Catalog.X.Form.F.Field.Price`, `CommonForm.F.Group.Main`) with cascading update (BSL code, forms, metadata; for a form element the scope is that form, and string literals are never rewritten). Workflow: 1) call without `confirm` — preview all change points with indices; 2) (optional) `disableIndices: "2,3,5"` to skip specific changes; 3) `confirm: true`. `maxResults` (default 20, 0 = no limit) caps the preview. Russian FQNs are supported | **Only** this way to rename; manual XML editing is dangerous. `modify_metadata` does **not** rename |
 | `delete_metadata` | Delete an object **or** member by FQN with cascading reference cleanup (BSL, forms, other metadata). Two-phase: call without `confirm` to preview affected references, then `confirm: true` to apply. Russian FQNs are supported | Instead of manual `.mdo` editing |
 | `create_metadata` | Create a metadata node addressed by a 1C full-name FQN: a top-level object (`Catalog.Products`) **or** a subordinate member (`Catalog.Products.Attribute.Weight`, `InformationRegister.Prices.Dimension.Product`, `Document.Order.TabularSection.Goods`, `Enum.Colors.EnumValue.Red`). Kind is inferred from the FQN; type/kind tokens may be English or Russian. Supported top-level types: `Catalog`, `Document`, `InformationRegister`, `AccumulationRegister`, `Enum`, `CommonModule`, `Report`, `DataProcessor`. Params: `projectName`, `fqn`, optional `properties` (`[{name, value, language?}]`, only `synonym`/`comment` at creation), `expectedNotExists`. UUID is generated automatically | Instead of hand-building a new `.mdo`; set other properties with `modify_metadata`; run `get_project_errors` afterwards |
 | `modify_metadata` | Set properties of an object **or** member by FQN. Params: `projectName`, `fqn`, `properties` (`[{name, value, language?}]`). Each property is validated against the assignable schema and allowed enum literals. Can set `synonym` (language-keyed), `comment`, and the data `type` (structured spec). Discover what is settable via `get_metadata_details(assignable: true)` | Set type/synonym/other assignable properties without editing `.mdo`. Does **not** rename — use `rename_metadata_object` |

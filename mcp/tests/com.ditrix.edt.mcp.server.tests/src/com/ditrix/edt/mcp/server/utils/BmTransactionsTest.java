@@ -20,6 +20,8 @@ import org.junit.Test;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.bm.integration.IBmTask;
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.tools.base.WriteScope;
 
 /**
  * Tests for {@link BmTransactions}.
@@ -80,5 +82,66 @@ public class BmTransactionsTest
         // A write must go through the writable path, never the read-only one.
         verify(model).execute(any());
         verify(model, never()).executeReadonlyTask(any());
+    }
+
+    @Test
+    public void testWriteReturnRecordsCommitBeforeCallerSideWorkCanFail()
+    {
+        IBmModel model = mock(IBmModel.class);
+        IBmTransaction tx = mock(IBmTransaction.class);
+        when(model.execute(any())).thenAnswer(inv -> {
+            IBmTask<?> task = inv.getArgument(0);
+            return task.execute(tx, null);
+        });
+
+        WriteScope scope = new WriteScope();
+        WriteScope.runWithScope(scope, () ->
+            BmTransactions.write(model, "commit", (t, pm) -> "done")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        String failure = scope.markErrorAfterRecordedWrite(
+            ToolResult.error("response rendering failed").toJson()); //$NON-NLS-1$
+        assertTrue("a BM write that returned must mark every later error as post-commit: " + failure, //$NON-NLS-1$
+            failure.contains("\"mutationCommitted\":true")); //$NON-NLS-1$
+        assertTrue("commit-only recording must not invent an export project", //$NON-NLS-1$
+            scope.writtenProjects().isEmpty());
+    }
+
+    @Test
+    public void testForceExportToDiskRecordsTheProjectIntoTheCallsWriteScope()
+    {
+        // The #408 mechanism, pinned at the point that makes it a mechanism rather than a
+        // convention: this is the ONE place the plugin hands save tasks to the platform, reached
+        // from ~20 call sites across three tools and from the shared form/rights writers. Because
+        // the record is taken here, a tool declares where it wrote by DOING the write - a new tool
+        // cannot forget a step it never has to take.
+        org.eclipse.core.resources.IProject project =
+            mock(org.eclipse.core.resources.IProject.class);
+        when(project.getName()).thenReturn("TestConfiguration"); //$NON-NLS-1$
+
+        com.ditrix.edt.mcp.server.tools.base.WriteScope scope =
+            new com.ditrix.edt.mcp.server.tools.base.WriteScope();
+        com.ditrix.edt.mcp.server.tools.base.WriteScope.runWithScope(scope,
+            () -> BmTransactions.forceExportToDisk(project, "Catalog.Products")); //$NON-NLS-1$
+
+        // Headless there are no EDT services, so the submission itself cannot succeed - and that is
+        // the case worth pinning: the record is taken for the ATTEMPT. A refused submission is not
+        // evidence that the call did not write (the model change stands, and a list submission that
+        // threw part way through is not even evidence that nothing was queued), so dropping the
+        // project there is how the barrier used to end up waiting for the wrong one.
+        assertEquals(java.util.Collections.singletonList("TestConfiguration"), //$NON-NLS-1$
+            scope.writtenProjects());
+    }
+
+    @Test
+    public void testForceExportToDiskOutsideAWriteCallRecordsNothingAndDoesNotThrow()
+    {
+        // The same helper is reachable from paths that are not a write tool's call at all
+        // (build_external_objects runs in a Job). Recording must simply not happen there.
+        org.eclipse.core.resources.IProject project =
+            mock(org.eclipse.core.resources.IProject.class);
+        when(project.getName()).thenReturn("TestConfiguration"); //$NON-NLS-1$
+
+        assertTrue("no services headless, so no submission - and no exception either", //$NON-NLS-1$
+            !BmTransactions.forceExportToDisk(project, "Catalog.Products")); //$NON-NLS-1$
     }
 }

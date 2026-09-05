@@ -15,11 +15,14 @@ get_metadata_details(assignable:true).
 
 reset: kind="write-metadata" -> reset_model() after each test.
 
-Fixture: Catalog.Catalog (attribute "Attribute"), CommonModule.Error/OK/Calc, ...
+Fixture: Catalog.Catalog (attribute "Attribute"), CommonModule.Error/OK/Calc/DrySignal,
+HTTPService.ProbeService (the only place a 64-bit property exists), ...
 """
 
 import os
+import time
 import uuid
+import xml.etree.ElementTree as ET
 
 from harness import (
     call,
@@ -35,12 +38,49 @@ from harness import (
     tree_snapshot,
     wait_for_project_ready,
     diff,
+    poll_disk_contains,
     read_disk,
     e2e_test,
+    _fail,
     PROJECT,
     PROJECT_DIR,
     TESTS_PROJECT,
 )
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_report_main_data_composition_schema_accepts_owned_template_member_reference():
+    report_name = "E2EMainDcsReference"
+    report = "Report." + report_name
+    template = report + ".Template.AgentMainSchema"
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": report}),
+              "create report for main DCS reference")
+    wait_for_project_ready()
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": template}),
+              "create the report-owned template member")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": template,
+        "properties": [{"name": "templateType", "value": "DataCompositionSchema"}],
+    }), "declare the owned template as a DCS")
+    wait_for_project_ready()
+
+    wired = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": report,
+        "properties": [{"name": "mainDataCompositionSchema", "value": template}],
+    })
+    assert_ok(wired, "wire the report main schema to its BasicTemplate member")
+    assert "mainDataCompositionSchema" in (wired.structured.get("applied") or [])
+    poll_disk_contains("src/Reports/%s/%s.mdo" % (report_name, report_name),
+                       "AgentMainSchema",
+                       ctx="the report mainDataCompositionSchema reference must reach disk")
+
+
+# The fixture form every form-member test writes to.
+_ITEM_FORM = "src/Catalogs/Catalog/Forms/ItemForm/Form.form"
+_COMMON_FORM_MDO = "src/CommonForms/Form/Form.mdo"
 
 
 def _assignable_text(fqn):
@@ -62,6 +102,76 @@ def _first_enum_with_value(fqn):
             if allowed:
                 return cells[0], allowed[0]
     return None, None
+
+
+def _assignable_row(fqn, property_name):
+    """The assignable-table row for one property, or None when the property is absent."""
+    prefix = "| " + property_name + " |"
+    return next((line for line in _assignable_text(fqn).splitlines()
+                 if line.strip().startswith(prefix)), None)
+
+
+def _assert_header_picture_reached_disk(picture_name):
+    """Require one Form.form headerPicture element to name the expected picture target."""
+    form_root = ET.fromstring(read_disk(_ITEM_FORM))
+    header_pictures = [element for element in form_root.iter()
+                       if element.tag.rsplit("}", 1)[-1] == "headerPicture"]
+    assert header_pictures, "Form.form must contain a headerPicture element after the write"
+    serialized_headers = [ET.tostring(element, encoding="unicode")
+                          for element in header_pictures]
+    assert any(picture_name in element for element in serialized_headers), \
+        "a headerPicture element must name %s: %r" % (picture_name, serialized_headers)
+
+
+def _assert_picture_current_value(fqn, expected):
+    """Require the assignable row to expose exactly one feedable canonical picture value."""
+    row = _assignable_row(fqn, "headerPicture")
+    assert row is not None, "headerPicture must be listed by assignable:true after the write"
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    assert len(cells) >= 3, "headerPicture assignable row is malformed: %r" % row
+    assert cells[1] == "PICTURE", "headerPicture must expose the PICTURE value kind: %r" % row
+    assert cells[2] == expected, \
+        "headerPicture current value must be exactly %s, got: %r" % (expected, row)
+
+
+def _seed_web_service_parameter(stem):
+    """Create a WebService -> Operation -> Parameter chain and return the parameter FQN."""
+    service = stem + "Service"
+    operation = stem + "Operation"
+    parameter = stem + "Parameter"
+    service_fqn = "WebService." + service
+    operation_fqn = service_fqn + ".Operation." + operation
+    parameter_fqn = operation_fqn + ".Parameter." + parameter
+    for fqn, label in ((service_fqn, "WebService"),
+                       (operation_fqn, "Operation"),
+                       (parameter_fqn, "Parameter")):
+        assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}),
+                  "seed %s for QName modify: %s" % (label, fqn))
+        wait_for_project_ready()
+    return parameter_fqn
+
+
+def _seed_web_service(stem):
+    """Create one isolated WebService and return (FQN, on-disk .mdo path)."""
+    name = stem + "Service"
+    fqn = "WebService." + name
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}),
+              "seed WebService for xdtoPackages: %s" % fqn)
+    wait_for_project_ready()
+    return fqn, "src/WebServices/%s/%s.mdo" % (name, name)
+
+
+def _seed_xdto_package(stem):
+    """Create one valid isolated configuration XDTOPackage and return its FQN."""
+    name = stem + "Package"
+    fqn = "XDTOPackage." + name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "targetNamespace": "urn:e2e:%s" % stem,
+    }), "seed configuration XDTO package for xdtoPackages: %s" % fqn)
+    wait_for_project_ready()
+    return fqn
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -105,7 +215,8 @@ def test_modify_normalizes_yo_in_synonym_and_comment_by_default():
     r = call("modify_metadata", {
         "projectName": PROJECT, "fqn": "Catalog.Catalog",
         "properties": [
-            {"name": "synonym", "value": syn_yo, "language": "ru"},
+            # 'en' is the fixture's only declared locale; 'ru' is now rejected (issue #298).
+            {"name": "synonym", "value": syn_yo, "language": "en"},
             {"name": "comment", "value": com_yo},
         ],
     })
@@ -163,6 +274,322 @@ def test_get_metadata_details_assignable_lists_enum_allowed_values():
     assert_contains(text, "Assignable properties", "assignable mode must render the schema heading")
     assert_contains(text, "Allowed values", "assignable table must have an Allowed values column")
     assert "| ENUM |" in text, "an attribute must list at least one ENUM property: %r" % (text[:400],)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Contained mcore values — Picture (#497), QName and Value list (#450)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_form_field_header_picture_round_trips_symbolic_name():
+    fqn = "Catalog.Catalog.Form.ItemForm.Field.Description"
+    value = "StdPicture.Change"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "headerPicture", "value": value}],
+    })
+    assert_ok(r, "set a standard header picture on a form field")
+    assert "headerPicture" in (r.structured.get("applied") or []), \
+        "headerPicture must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: modify_metadata submits/drains this form export. The containment element and
+    # symbolic target must both be present before another MCP call gets time to mask an early export.
+    assert_diff_contains("<headerPicture", ctx="the PictureRef containment must reach Form.form")
+    assert_diff_contains("Change", ctx="the standard picture target must reach Form.form")
+
+    row = _assignable_row(fqn, "headerPicture")
+    assert row is not None, "headerPicture must be listed by assignable:true after the write"
+    assert_contains(row, "PICTURE", "headerPicture must expose the PICTURE value kind")
+    assert_contains(row, value, "the current picture must round-trip as StdPicture.Change")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_form_field_extended_header_picture_reaches_disk_and_round_trips_prefix():
+    fqn = "Catalog.Catalog.Form.ItemForm.Field.Description"
+    value = "StdExtPicture.CopyToClipboard"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "headerPicture", "value": value}],
+    })
+    assert_ok(r, "set an extended-standard header picture on a form field")
+    assert "headerPicture" in (r.structured.get("applied") or []), \
+        "headerPicture must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: CopyToClipboard exists only in the extended set, so finding it inside the
+    # headerPicture element proves that the full StdExtPicture provider key reached Form.form.
+    _assert_header_picture_reached_disk("CopyToClipboard")
+
+    # Exact equality pins the /Pictures/StdExt/ discriminator; StdPicture.CopyToClipboard is wrong.
+    _assert_picture_current_value(fqn, value)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_standard_prefix_cannot_resolve_extended_only_picture_and_changes_nothing():
+    bad = "StdPicture.CopyToClipboard"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.Description",
+        "properties": [{"name": "headerPicture", "value": bad}],
+    })
+    e = assert_error(r, "extended-only picture requested through the standard prefix")
+    assert_error_quality(e, names=[bad],
+                         suggests=["platform version", "StdPicture.<Name>",
+                                   "StdExtPicture.<Name>"],
+                         ctx="the two platform-picture prefixes are not interchangeable")
+    assert_no_diff("a rejected extended picture with the wrong prefix must change nothing")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_russian_extended_picture_name_round_trips_canonical_english_name():
+    fqn = "Catalog.Catalog.Form.ItemForm.Field.Description"
+    russian_value = "StdExtPicture.Копировать"
+    canonical_value = "StdExtPicture.CopyToClipboard"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "headerPicture", "value": russian_value}],
+    })
+    assert_ok(r, "set an extended-standard picture through its Russian provider key")
+    assert "headerPicture" in (r.structured.get("applied") or []), \
+        "headerPicture must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: the bilingual provider key must serialize the same canonical platform target.
+    _assert_header_picture_reached_disk("CopyToClipboard")
+
+    _assert_picture_current_value(fqn, canonical_value)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_form_field_common_picture_persists_reference_and_round_trips():
+    picture_name = "E2EHeaderCommonPicture"
+    picture_fqn = "CommonPicture." + picture_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": picture_fqn,
+    }), "seed a common picture for the form-field reference")
+    wait_for_project_ready()
+
+    field_fqn = "Catalog.Catalog.Form.ItemForm.Field.Description"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": field_fqn,
+        "properties": [{"name": "headerPicture", "value": picture_fqn}],
+    })
+    assert_ok(r, "set a common-picture header on a form field")
+    assert "headerPicture" in (r.structured.get("applied") or []), \
+        "headerPicture must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: require the exact CommonPicture reference inside headerPicture in Form.form.
+    # The same FQN also occurs in Configuration.mdo after create_metadata, so a global diff
+    # assertion would not prove that the PictureRef reached the form field.
+    poll_disk_contains(_ITEM_FORM, picture_fqn,
+                       ctx="the CommonPicture target must reach Form.form")
+    form_root = ET.fromstring(read_disk(_ITEM_FORM))
+    header_pictures = [element for element in form_root.iter()
+                       if element.tag.rsplit("}", 1)[-1] == "headerPicture"]
+    assert header_pictures, "Form.form must contain a headerPicture element after the write"
+    serialized_headers = [ET.tostring(element, encoding="unicode")
+                          for element in header_pictures]
+    assert any(picture_fqn in element for element in serialized_headers), \
+        "a headerPicture element must name %s: %r" % (picture_fqn, serialized_headers)
+
+    # A same-session read sees the resolved object installed by modify_metadata and misses the
+    # persisted-reference proxy shape. The scoped clean is the suite's measured disk re-import
+    # mechanism (also used for planted form data below): it restarts only TestConfiguration's
+    # project context and rebuilds this form from the Form.form asserted above.
+    wait_for_project_ready()
+    reloaded = call("clean_project", {"projectName": PROJECT})
+    assert_ok(reloaded, "reload the persisted CommonPicture reference from disk")
+    wait_for_project_ready()
+
+    row = _assignable_row(field_fqn, "headerPicture")
+    assert row is not None, "headerPicture must be listed by assignable:true after the write"
+    assert_contains(row, "PICTURE", "headerPicture must expose the PICTURE value kind")
+    assert_contains(row, picture_fqn,
+                    "the current picture must round-trip as CommonPicture.<Name>")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_malformed_form_field_picture_is_actionable_and_changes_nothing():
+    bad = "Change"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.Description",
+        "properties": [{"name": "headerPicture", "value": bad}],
+    })
+    e = assert_error(r, "picture value without a symbolic type prefix")
+    assert_error_quality(e, names=[bad],
+                         suggests=["StdPicture.<Name>", "StdExtPicture.<Name>",
+                                   "CommonPicture.<Name>",
+                                   "list_common_pictures"],
+                         ctx="a malformed picture names all accepted forms and discovery tool")
+    assert_no_diff("a rejected picture value must not change the project")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_web_service_parameter_qname_round_trips_compact_form():
+    fqn = _seed_web_service_parameter("E2EQNameHappy")
+    value = "{http://www.w3.org/2001/XMLSchema}string"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "xdtoValueType", "value": value}],
+    })
+    assert_ok(r, "set xdtoValueType on a web-service operation parameter")
+    assert "xdtoValueType" in (r.structured.get("applied") or []), \
+        "xdtoValueType must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: prove the nested QName, not merely the already-created Parameter name.
+    assert_diff_contains("<xdtoValueType", ctx="the QName containment must reach the WebService .mdo")
+    assert_diff_contains("http://www.w3.org/2001/XMLSchema",
+                         ctx="the QName namespace must reach the WebService .mdo")
+    assert_diff_contains("<name>string</name>",
+                         ctx="the QName local name must reach the WebService .mdo")
+
+    row = _assignable_row(fqn, "xdtoValueType")
+    assert row is not None, "xdtoValueType must be listed by assignable:true after the write"
+    assert_contains(row, "QNAME", "xdtoValueType must expose the QNAME value kind")
+    assert_contains(row, value, "the current QName must round-trip in compact form")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_bad_compact_web_service_parameter_qname_is_actionable_and_atomic():
+    fqn = _seed_web_service_parameter("E2EQNameBad")
+    before = tree_snapshot()
+    bad = "{http://www.w3.org/2001/XMLSchema}"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "xdtoValueType", "value": bad}],
+    })
+    e = assert_error(r, "compact QName with no local name")
+    assert_error_quality(e, names=[bad],
+                         suggests=["{nsUri}name", "nsUri", "name"],
+                         ctx="a bad compact QName shows both required sides and accepted grammar")
+    assert_tree_unchanged(before, "a rejected QName must not change the seeded WebService tree")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_web_service_xdto_packages_mixes_reference_and_namespace_on_disk():
+    package_fqn = _seed_xdto_package("E2EXdtoPackagesHappy")
+    service_fqn, service_path = _seed_web_service("E2EXdtoPackagesHappy")
+    namespace = "http://v8.1c.ru/8.1/data/core"
+    expected = [package_fqn, namespace]
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": service_fqn,
+        "properties": [{"name": "xdtoPackages", "value": expected}],
+    })
+    assert_ok(r, "replace WebService.xdtoPackages with a mixed two-entry list")
+    assert "xdtoPackages" in (r.structured.get("applied") or []), \
+        "xdtoPackages must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: inspect only the service's own list, preserving order and checking each concrete
+    # mcore Value subtype. The package FQN also exists in Configuration.mdo, so a global diff match
+    # would not prove that the ReferenceValue reached WebService.xdtoPackages.
+    root = ET.fromstring(read_disk(service_path))
+    entries = [element for element in root.iter()
+               if element.tag.rsplit("}", 1)[-1] == "xdtoPackages"]
+    stored = []
+    for entry in entries:
+        value_type = next((value for key, value in entry.attrib.items()
+                           if key.rsplit("}", 1)[-1] == "type"), None)
+        value_node = next((child for child in entry
+                           if child.tag.rsplit("}", 1)[-1] == "value"), None)
+        stored.append((value_type, value_node.text if value_node is not None else None))
+    assert stored == [
+        ("core:ReferenceValue", package_fqn),
+        ("core:StringValue", namespace),
+    ], "WebService .mdo must preserve both concrete Value kinds and order: %r" % (stored,)
+
+    row = _assignable_row(service_fqn, "xdtoPackages")
+    assert row is not None, "xdtoPackages must be listed by assignable:true after the write"
+    assert_contains(row, "MCORE_VALUE_LIST",
+                    "xdtoPackages must expose the mcore Value-list kind")
+    assert_contains(row, package_fqn,
+                    "the configuration package must round-trip in the current array")
+    assert_contains(row, namespace,
+                    "the platform namespace must round-trip in the current array")
+    assert row.index(package_fqn) < row.index(namespace), \
+        "the current array must preserve caller order: %s" % row
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_common_form_use_purposes_array_and_scalar_replace_the_whole_list():
+    fqn = "CommonForm.Form"
+    array_value = ["MobileDevice"]
+
+    array_result = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "usePurposes", "value": array_value}],
+    })
+    assert_ok(array_result, "replace CommonForm.usePurposes from a JSON array")
+    assert "usePurposes" in (array_result.structured.get("applied") or []), \
+        "the many-enum property must be reported as applied: %r" % (array_result.structured,)
+
+    # DISK FIRST: the fixture starts with both literals, so seeing exactly one proves replacement.
+    root = ET.fromstring(read_disk(_COMMON_FORM_MDO))
+    stored = [element.text for element in root.iter()
+              if element.tag.rsplit("}", 1)[-1] == "usePurposes"]
+    assert stored == array_value, \
+        "the array form must replace the persisted usePurposes list: %r" % (stored,)
+
+    row = _assignable_row(fqn, "usePurposes")
+    assert row is not None, "usePurposes must be listed by assignable:true after the array write"
+    assert_contains(row, "MANY_ENUM", "usePurposes must expose the many-enum value kind")
+    assert_contains(row, '["MobileDevice"]',
+                    "get_metadata_details must read back the array replacement")
+    assert_contains(row, "PersonalComputer, MobileDevice",
+                    "get_metadata_details must list every allowed enum literal")
+
+    scalar_value = "PersonalComputer"
+    scalar_result = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": fqn,
+        "properties": [{"name": "usePurposes", "value": scalar_value}],
+    })
+    # Before #510 this exact scalar call leaked a raw ClassCastException from EMF.
+    assert_ok(scalar_result, "replace CommonForm.usePurposes from the scalar shorthand")
+    assert_not_contains(scalar_result.text, "ClassCastException",
+                        "the former raw EMF failure must not reach the caller")
+    assert "usePurposes" in (scalar_result.structured.get("applied") or []), \
+        "the scalar shorthand must be reported as applied: %r" % (scalar_result.structured,)
+
+    root = ET.fromstring(read_disk(_COMMON_FORM_MDO))
+    stored = [element.text for element in root.iter()
+              if element.tag.rsplit("}", 1)[-1] == "usePurposes"]
+    assert stored == [scalar_value], \
+        "the scalar shorthand must replace, not append to, the persisted list: %r" % (stored,)
+
+    row = _assignable_row(fqn, "usePurposes")
+    assert row is not None, "usePurposes must be listed by assignable:true after the scalar write"
+    assert_contains(row, '["PersonalComputer"]',
+                    "get_metadata_details must show only the scalar replacement")
+    assert_not_contains(row, '["MobileDevice"]',
+                        "the earlier value must not survive as an appended entry")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_bad_web_service_xdto_package_entry_is_actionable_and_atomic():
+    service_fqn, _ = _seed_web_service("E2EXdtoPackagesBad")
+    before = tree_snapshot()
+    bad = "XDTOPackege.Nope"
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": service_fqn,
+        "properties": [{"name": "xdtoPackages", "value": [bad]}],
+    })
+    e = assert_error(r, "misspelled XDTO-package type token")
+    assert_error_quality(e, names=[bad],
+                         suggests=["XDTOPackage.<Name>", "http://", "urn:"],
+                         ctx="a bad entry names both configuration and platform package forms")
+    assert_tree_unchanged(before,
+                          "a rejected xdtoPackages replacement must leave the seeded tree unchanged")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -283,6 +710,145 @@ def test_set_typed_ref_shorthand():
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_event_subscription_source_accepts_concrete_document_object():
+    document_name = "E2EProducedSourceDocument"
+    subscription_name = "E2EProducedSourceSubscription"
+    subscription_fqn = "EventSubscription." + subscription_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Document." + document_name,
+    }), "seed the Document whose produced Object type will be assigned")
+    wait_for_project_ready()
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": subscription_fqn,
+    }), "seed the EventSubscription")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": subscription_fqn,
+        "properties": [{
+            "name": "source",
+            "value": {"types": [{"kind": "DocumentObject", "ref": document_name}]},
+        }],
+    })
+    assert_ok(r, "set EventSubscription.source to a concrete DocumentObject")
+    assert "source" in (r.structured.get("applied") or []), \
+        "source must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: compare the isolated <source>/<types> element by exact value. A substring check
+    # would accept a malformed token with an extra prefix/suffix, which is the regression this case
+    # must catch.
+    relative_path = "src/EventSubscriptions/%s/%s.mdo" % (
+        subscription_name, subscription_name)
+    root = ET.fromstring(read_disk(relative_path))
+    source_elements = [element for element in root.iter()
+                       if element.tag.rsplit("}", 1)[-1] == "source"]
+    assert len(source_elements) == 1, \
+        "the EventSubscription .mdo must contain exactly one <source>: %r" % source_elements
+    type_elements = [element for element in source_elements[0].iter()
+                     if element.tag.rsplit("}", 1)[-1] == "types"]
+    assert len(type_elements) == 1, \
+        "EventSubscription.source must contain exactly one <types>: %r" % type_elements
+    type_element = type_elements[0]
+    assert not type_element.attrib and len(type_element) == 0, \
+        "EventSubscription.source <types> must be a plain text element: %s" % \
+        ET.tostring(type_element, encoding="unicode")
+    expected_element = "<types>DocumentObject.%s</types>" % document_name
+    serialized_element = "<types>%s</types>" % (type_element.text or "")
+    assert serialized_element == expected_element, \
+        "EventSubscription.source must serialize exactly as %s, got %s" % (
+            expected_element, serialized_element)
+
+    row = _assignable_row(subscription_fqn, "source")
+    assert row is not None, "EventSubscription.source must remain readable through assignable:true"
+    assert_contains(row, "DocumentObject." + document_name,
+                    "MODEL read-back must expose the concrete produced type")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_event_subscription_source_accepts_abstract_nested_produced_type():
+    subscription_name = "E2ENestedProducedSourceSubscription"
+    subscription_fqn = "EventSubscription." + subscription_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": subscription_fqn,
+    }), "seed the EventSubscription")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": subscription_fqn,
+        "properties": [{
+            "name": "source",
+            "value": {"types": [
+                {"kind": "InformationRegisterRecordSet"},
+                {"kind": "RecalculationRecordSet"},
+            ]},
+        }],
+    })
+    assert_ok(r, "set EventSubscription.source to top-level and nested abstract RecordSets")
+    assert "source" in (r.structured.get("applied") or []), \
+        "source must be reported as applied: %r" % (r.structured,)
+
+    relative_path = "src/EventSubscriptions/%s/%s.mdo" % (
+        subscription_name, subscription_name)
+    root = ET.fromstring(read_disk(relative_path))
+    source_elements = [element for element in root.iter()
+                       if element.tag.rsplit("}", 1)[-1] == "source"]
+    assert len(source_elements) == 1, \
+        "the EventSubscription .mdo must contain exactly one <source>: %r" % source_elements
+    type_elements = [element for element in source_elements[0].iter()
+                     if element.tag.rsplit("}", 1)[-1] == "types"]
+    assert len(type_elements) == 2, \
+        "EventSubscription.source must contain exactly two <types>: %r" % type_elements
+    expected_types = {"InformationRegisterRecordSet", "RecalculationRecordSet"}
+    actual_types = {element.text or "" for element in type_elements}
+    assert actual_types == expected_types, \
+        "EventSubscription.source types must be %r, got %r" % (expected_types, actual_types)
+
+    row = _assignable_row(subscription_fqn, "source")
+    assert row is not None, "EventSubscription.source must remain readable through assignable:true"
+    assert_contains(row, "InformationRegisterRecordSet",
+                    "MODEL read-back must expose the top-level abstract produced type")
+    assert_contains(row, "RecalculationRecordSet",
+                    "MODEL read-back must expose the nested abstract produced type")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_persisted_catalog_attribute_refuses_concrete_document_object():
+    document_name = "E2EProducedStoredDocument"
+    attribute_name = "E2EProducedStoredAttribute"
+    attribute_fqn = "Catalog.Catalog.Attribute." + attribute_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Document." + document_name,
+    }), "seed the Document whose runtime Object type will be refused")
+    wait_for_project_ready()
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": attribute_fqn,
+    }), "seed the persisted Catalog attribute")
+    wait_for_project_ready()
+    before = tree_snapshot()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": attribute_fqn,
+        "properties": [{
+            "name": "type",
+            "value": {"types": [{"kind": "DocumentObject", "ref": document_name}]},
+        }],
+    })
+    e = assert_error(r, "a runtime DocumentObject on a persisted Catalog attribute")
+    assert_error_quality(e, names=["DocumentObject"],
+                         suggests=["runtime object type", "event subscription", "source", "Ref"],
+                         ctx="the refusal must name the legal runtime and persisted alternatives")
+    assert_tree_unchanged(before, "a rejected produced type must not touch the persisted attribute")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
 def test_set_valuestorage_type():
     # ValueStorage - a platform simple type with no qualifiers.
     _seed_attr_and_set_type("E2ETypeVSAttr", {"types": [{"kind": "ValueStorage"}]})
@@ -300,9 +866,90 @@ def test_set_uuid_type():
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
-def test_set_type_unknown_kind_lists_valuestorage_and_uuid():
-    # An unrecognized kind is a clean error that now also names ValueStorage/UUID among the
-    # supported primitive kinds (issue #279).
+def test_set_stored_attribute_type_to_defined_type_reaches_disk_and_model():
+    defined_name = "E2EMoneyAmount"
+    defined_fqn = "DefinedType." + defined_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": defined_fqn,
+    }), "seed the reusable DefinedType")
+    wait_for_project_ready()
+
+    attr_name = "E2EDefinedTypeAttr"
+    attr_fqn = "Catalog.Catalog.Attribute." + attr_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": attr_fqn,
+    }), "seed the stored attribute that will use the DefinedType")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": attr_fqn,
+        "properties": [{
+            "name": "type",
+            "value": {"types": [{"kind": "DefinedType", "ref": defined_name}]},
+        }],
+    })
+    assert_ok(r, "set a stored attribute type to a DefinedType")
+    assert "type" in (r.structured.get("applied") or []), \
+        "the DefinedType must be reported as applied: %r" % (r.structured,)
+
+    # DISK FIRST: inspect the new attribute's own type block, not the DefinedType collection entry
+    # that create_metadata already wrote to Configuration.mdo.
+    catalog_root = ET.fromstring(read_disk("src/Catalogs/Catalog/Catalog.mdo"))
+    attribute_blocks = []
+    for element in catalog_root:
+        if element.tag.rsplit("}", 1)[-1] != "attributes":
+            continue
+        names = [child.text for child in element
+                 if child.tag.rsplit("}", 1)[-1] == "name"]
+        if names == [attr_name]:
+            attribute_blocks.append(element)
+    assert len(attribute_blocks) == 1, \
+        "Catalog.mdo must contain exactly one attribute named %s" % attr_name
+    stored_types = [element.text for element in attribute_blocks[0].iter()
+                    if element.tag.rsplit("}", 1)[-1] == "types"]
+    assert stored_types == [defined_fqn], \
+        "the attribute type must store the DefinedType TypeSet: %r" % stored_types
+
+    row = _assignable_row(attr_fqn, "type")
+    assert row is not None, "the attribute type must remain readable through assignable:true"
+    assert_contains(row, defined_fqn,
+                    "the current type must round-trip as the feedable DefinedType FQN")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_unknown_defined_type_name_is_actionable_and_changes_nothing():
+    attr_name = "E2EUnknownDefinedTypeAttr"
+    attr_fqn = "Catalog.Catalog.Attribute." + attr_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": attr_fqn,
+    }), "seed the attribute for an unknown DefinedType refusal")
+    wait_for_project_ready()
+    before = tree_snapshot()
+
+    bad_name = "NoSuchDefinedTypeE2E"
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": attr_fqn,
+        "properties": [{
+            "name": "type",
+            "value": {"types": [{"kind": "DefinedType", "ref": bad_name}]},
+        }],
+    })
+    e = assert_error(r, "unknown DefinedType name")
+    assert_error_quality(e, names=[bad_name], suggests=["DefinedType", "check", "exists"],
+                         ctx="an unknown DefinedType must name the target and explain the fix")
+    assert_tree_unchanged(before,
+                          "a rejected DefinedType assignment must not change the seeded tree")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_type_unknown_kind_lists_valuestorage_uuid_and_defined_type():
+    # An unrecognized kind is a clean error that names ValueStorage/UUID and the reusable
+    # DefinedType grammar among the accepted forms.
     attr = "E2ETypeUnknownKindAttr"
     cr = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute." + attr})
     assert_ok(cr, "seed attribute")
@@ -312,8 +959,9 @@ def test_set_type_unknown_kind_lists_valuestorage_and_uuid():
         "properties": [{"name": "type", "value": {"types": [{"kind": "NotAKind_zzz"}]}}],
     })
     e = assert_error(r, "unknown type kind")
-    assert_error_quality(e, names=["NotAKind_zzz"], suggests=["ValueStorage", "UUID"],
-                         ctx="the unknown-kind error must list ValueStorage/UUID among the supported kinds")
+    assert_error_quality(e, names=["NotAKind_zzz"],
+                         suggests=["ValueStorage", "UUID", "DefinedType"],
+                         ctx="the unknown-kind error must list the supported reusable type forms")
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
@@ -501,6 +1149,245 @@ def test_modify_form_field_title_visible_readonly():
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_form_attribute_view_and_edit_are_assignable():
+    # Issue #382: view/edit were not assignable at all, so an attribute created without them
+    # (every attribute created before the create-side fix) could not be repaired through MCP -
+    # and the configuration stayed unloadable. The wire value is a plain boolean addressing the
+    # nested <common> flag.
+    _seed_form_attribute("MFViewEditAttr")
+    fqn = "Catalog.Catalog.Form.ItemForm.Attribute.MFViewEditAttr"
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "view", "value": False}, {"name": "edit", "value": False}],
+    })
+    assert_ok(r, "set view/edit on a form attribute")
+    applied = r.structured.get("applied") or []
+    assert "view" in applied and "edit" in applied, \
+        "both flags must be reported applied: %r" % (r.structured,)
+    _poll_attribute_flag("MFViewEditAttr", "view", None,
+                         ctx="the cleared view flag must land in the form's .form on disk")
+    _poll_attribute_flag("MFViewEditAttr", "edit", None,
+                         ctx="the cleared edit flag must land in the form's .form on disk")
+
+    back = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "view", "value": True}]})
+    assert_ok(back, "set view back to true")
+    _poll_attribute_flag("MFViewEditAttr", "view", "true",
+                         ctx="setting the flag back on must land on disk too")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_form_attribute_view_rejects_a_non_boolean():
+    _seed_form_attribute("MFViewBadAttr")
+    snap = tree_snapshot()
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.MFViewBadAttr",
+        "properties": [{"name": "view", "value": "maybe"}]})
+    e = assert_error(r, "a non-boolean view value must be refused")
+    assert_error_quality(e, names=["maybe", "view"], suggests=["true or false"])
+    assert_tree_unchanged(snap, ctx="a refused flag change must not touch the disk")
+
+
+def _form_attribute_block(form_xml, name):
+    """The <attributes> element named `name` from a Form.form document, or None."""
+    root = ET.fromstring(form_xml)
+    for attributes in root.iter("attributes"):
+        child = attributes.find("name")
+        if child is not None and child.text == name:
+            return attributes
+    return None
+
+
+def _attribute_flag_common(attr, flag):
+    """The `common` value an attribute's AdjustableBoolean flag has ON DISK, as a string.
+
+    Returns None when the flag object is there but carries no `common` child - which is what a
+    CLEARED flag looks like. EMF omits a feature sitting at its DEFAULT, and
+    AdjustableBoolean.common defaults to false, so `view = false` serializes as an EMPTY
+    `<view/>`; the literal `<common>false</common>` is a string the writer never emits (measured
+    on the stand, not assumed). Raises when the attribute or the flag element is missing at all -
+    those are different failures and must not read as "cleared".
+    """
+    block = _form_attribute_block(read_disk(_ITEM_FORM), attr)
+    if block is None:
+        raise AssertionError("attribute %s is not in %s" % (attr, _ITEM_FORM))
+    element = block.find(flag)
+    if element is None:
+        raise AssertionError("attribute %s carries no <%s> element at all" % (attr, flag))
+    common = element.find("common")
+    return None if common is None else common.text
+
+
+def _poll_attribute_flag(attr, flag, want, timeout=20, ctx=""):
+    """Poll until an attribute's flag reads `want` on disk (None = cleared, i.e. an empty element)."""
+    deadline = time.time() + timeout
+    last = "<never read>"
+    while time.time() < deadline:
+        try:
+            last = _attribute_flag_common(attr, flag)
+            if last == want:
+                return
+        except AssertionError as e:
+            last = str(e)
+        time.sleep(0.5)
+    raise AssertionError("expected %s.<%s> to hold common=%r [%s]; it holds %r"
+                         % (attr, flag, want, ctx, last))
+
+
+def _view_role_overrides(block):
+    """The role FQNs of the per-role <for> overrides under an attribute's <view>; [] when none.
+
+    An AdjustableBoolean is a `common` flag PLUS a `for` list of ForRoleType entries (role +
+    value). The wire boolean addresses `common` only, so this reads the half nothing on the
+    surface writes - and the half a careless applier drops without a word."""
+    view = None if block is None else block.find("view")
+    if view is None:
+        return []
+    roles = []
+    for entry in view.findall("for"):
+        role = entry.find("role")
+        if role is not None and role.text:
+            roles.append(role.text.strip())
+    return roles
+
+
+def _plant_view_role_override(attr, role_fqn):
+    """Write a per-role override into `attr`'s <view> straight onto the fixture on disk.
+
+    NO tool authors a ForRoleType entry: `view`/`edit` take a plain boolean and it addresses
+    `common`, and nothing else in the surface writes an AdjustableBoolean's `for` list. So the
+    override is planted on disk - the same supported pattern
+    test_xdto_namespace_change_cascades_into_referencing_package uses to plant its referencing
+    package - and the caller brings it into the MODEL with clean_project, the deterministic
+    re-import (a Windows stand's auto-refresh is an accident, not a mechanism).
+
+    The file is read and written with newline='' so its CRLF endings survive untouched."""
+    full = os.path.join(PROJECT_DIR, _ITEM_FORM)
+    with open(full, encoding="utf-8", newline="") as f:
+        text = f.read()
+    anchor = "<name>%s</name>" % attr
+    if anchor not in text:
+        raise AssertionError("setup failed: %s is not in %s yet" % (attr, _ITEM_FORM))
+    start = text.index(anchor)
+    end = text.index("</attributes>", start)
+    block = text[start:end]
+    if "</view>" not in block:
+        raise AssertionError("setup failed: %s carries no <view> block to extend" % attr)
+    override = "<for><value>true</value><role>%s</role></for>" % role_fqn
+    patched = text[:start] + block.replace("</view>", override + "</view>", 1) + text[end:]
+    with open(full, "w", encoding="utf-8", newline="") as f:
+        f.write(patched)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_form_attribute_view_flip_preserves_per_role_overrides():
+    """Issue #382: `view` is a CONTAINED AdjustableBoolean - a `common` flag PLUS a `for` list of
+    per-role overrides. Setting the flag must rewrite `common` on the object that is already
+    there; a plain eSet would put a fresh object in its place and take the overrides with it.
+    That apply branch is unreachable from a unit test, so this is the only thing pinning it.
+
+    The override has to be planted on disk (see _plant_view_role_override) because no tool
+    authors one. That the platform round-trips the planted entry through clean_project and back
+    out again was MEASURED on the stand, not assumed, so a failure to seed is reported as a
+    failure - a skip here would be indistinguishable from a test that checks nothing. The seed
+    is verified BEFORE the flag flip, so its diagnosis can never be confused with the bug under
+    test."""
+    role = "E2EViewForRole"
+    role_fqn = "Role." + role
+    attr = "MFForRoleAttr"
+    r = call("create_metadata", {"projectName": PROJECT, "fqn": role_fqn})
+    assert_ok(r, "seed the role the override points at")
+    poll_diff_contains(role, ctx="the seeded role must be on disk before the re-import")
+    _seed_form_attribute(attr)
+    poll_disk_contains(_ITEM_FORM, "<name>%s</name>" % attr,
+                       ctx="the seeded attribute must be on disk before it is patched")
+
+    _plant_view_role_override(attr, role_fqn)
+    wait_for_project_ready()
+    r = call("clean_project", {"projectName": PROJECT})
+    assert_ok(r, "clean_project re-imports the planted per-role override from disk")
+    wait_for_project_ready()
+
+    fqn = "Catalog.Catalog.Form.ItemForm.Attribute." + attr
+    # Force a fresh export FROM THE MODEL through a property that has nothing to do with the
+    # adjustable flags. What comes back says whether the model really holds the planted
+    # override: without this probe a missing <for> after the flip could mean either "the
+    # applier dropped it" or "it was never imported", and those need opposite reactions.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "type",
+                        "value": {"types": [{"kind": "Number", "precision": 10, "scale": 2}]}}]})
+    assert_ok(r, "re-export the form from the model through an unrelated property")
+    poll_disk_contains(_ITEM_FORM, "precision",
+                       ctx="the type change must re-export the form")
+    seeded = _view_role_overrides(_form_attribute_block(read_disk(_ITEM_FORM), attr))
+    assert role_fqn in seeded, (
+        "setup failed: the planted per-role <for> override on %s did not survive the "
+        "import/export round trip, so the flag flip below would have nothing to preserve and "
+        "would pass vacuously; <view> holds %r" % (attr, seeded))
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "view", "value": False}]})
+    assert_ok(r, "clear view on an attribute carrying a per-role override")
+    _poll_attribute_flag(attr, "view", None,
+                         ctx="the cleared flag must land in the form's .form on disk")
+    block = _form_attribute_block(read_disk(_ITEM_FORM), attr)
+    assert block is not None, "the attribute must still be in Form.form"
+    view = block.find("view")
+    assert view is not None, "<view> must survive the flip as a structured block"
+    assert role_fqn in _view_role_overrides(block), \
+        "the per-role override must survive the flag flip - a plain eSet would have replaced " \
+        "the AdjustableBoolean and taken it along; <view> now holds %r" % (
+            _view_role_overrides(block),)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_form_attribute_view_flip_rewrites_the_flag_in_place():
+    """The structural half of the same guarantee, needing no role fixture: the flag stays a
+    NESTED object across both polarities, and only the addressed one moves.
+
+    `view` must remain an ELEMENT the whole way - a write of a bare boolean into the slot would
+    show up as `<view>false</view>` - and the untouched sibling `<edit>` pins that clearing one
+    flag did not disturb the other. Turning it back ON matters as much as clearing it: that is
+    the branch that REUSES the object already in the slot, and it is the same branch the
+    per-role-override test proves keeps the `for` list.
+
+    On disk a cleared flag is an EMPTY `<view/>`, never `<common>false</common>`: EMF omits a
+    feature sitting at its default and `common` defaults to false (measured on the stand)."""
+    attr = "MFViewInPlaceAttr"
+    _seed_form_attribute(attr)
+    fqn = "Catalog.Catalog.Form.ItemForm.Attribute." + attr
+    assert _attribute_flag_common(attr, "view") == "true", \
+        "a newly created attribute must start with view set (issue #382)"
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "view", "value": False}]})
+    assert_ok(r, "clear view on a form attribute")
+    _poll_attribute_flag(attr, "view", None,
+                         ctx="the cleared flag must land in the form's .form on disk")
+    block = _form_attribute_block(read_disk(_ITEM_FORM), attr)
+    view = block.find("view")
+    assert not (view.text or "").strip(), \
+        "<view> must stay a structured element, not a bare boolean: %r" % view.text
+    edit = block.find("edit")
+    edit_common = None if edit is None else edit.find("common")
+    assert edit_common is not None and edit_common.text == "true", \
+        "the sibling <edit> must be untouched, got %r" % (
+            None if edit_common is None else edit_common.text)
+
+    back = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "view", "value": True}]})
+    assert_ok(back, "set view back on")
+    _poll_attribute_flag(attr, "view", "true",
+                         ctx="the reuse branch must be able to set the flag back on")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
 def test_modify_form_attribute_type():
     # The deferred form-attribute value-TYPE: set Number(10,2) on a form attribute via the `type`
     # alias (mapped to the attribute's real valueType feature).
@@ -515,6 +1402,297 @@ def test_modify_form_attribute_type():
         "the type alias must apply to valueType: %r" % (r.structured,)
     poll_diff_contains("precision",
                        ctx="the form attribute's Number(10,2) type must land in the .form on disk")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_form_attribute_concrete_produced_type():
+    attr = "MFProducedCatalogObject"
+    _seed_form_attribute(attr)
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {
+            "types": [{"kind": "CatalogObject", "ref": "Catalog"}]}}],
+    })
+    assert_ok(r, "set a form attribute's type to a concrete CatalogObject")
+    assert "valueType" in (r.structured.get("applied") or []), \
+        "the type alias must apply the concrete produced type to valueType: %r" % (r.structured,)
+    poll_diff_contains("<types>CatalogObject.Catalog</types>",
+                       ctx="the concrete produced type must land in the form's .form on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# In-memory collection types on a FORM attribute, and their refusal elsewhere (issue #295)
+# ──────────────────────────────────────────────────────────────────────────────
+
+ITEM_FORM_FILE = "src/Catalogs/Catalog/Forms/ItemForm/Form.form"
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_form_attribute_valuetable_type():
+    # A form attribute CAN hold an in-memory collection - this is the whole point of #295.
+    _seed_form_attribute("MFValueTable")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.MFValueTable",
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}],
+    })
+    assert_ok(r, "set a form attribute's type to ValueTable")
+    poll_disk_contains(ITEM_FORM_FILE, "<types>ValueTable</types>",
+                       ctx="the ValueTable type must land in the form's .form on disk")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_form_attribute_valuetree_russian_token():
+    # The kind token is bilingual, like every other type token.
+    _seed_form_attribute("MFValueTree")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.MFValueTree",
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ДеревоЗначений"}]}}],
+    })
+    assert_ok(r, "set a form attribute's type to ValueTree via the Russian token")
+    poll_disk_contains(ITEM_FORM_FILE, "<types>ValueTree</types>",
+                       ctx="the Russian collection token must resolve to the ValueTree platform type")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_collection_type_refused_on_stored_attribute():
+    # EDT does NOT catch this: a ValueTable written into a .mdo attribute survives a full
+    # revalidation and only breaks later, in the platform. So the refusal must come from the tool,
+    # and it must say where the kind IS allowed and what to use instead (issue #295).
+    attr = "E2ECollectionOnStored"
+    cr = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute." + attr})
+    assert_ok(cr, "seed stored attribute")
+    wait_for_project_ready()
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}],
+    })
+    e = assert_error(r, "a stored attribute must refuse an in-memory collection")
+    assert_error_quality(e, names=["ValueTable"], suggests=["Form", "ValueStorage"],
+                         ctx="the refusal must name the kind, point at a FORM attribute and offer "
+                             "ValueStorage as the persistable alternative")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_set_attribute_column_type():
+    # A column is typed exactly like an attribute, addressed one level deeper.
+    _seed_form_attribute("MFColsOwner")
+    tr = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.MFColsOwner",
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    assert_ok(tr, "make the owner a ValueTable")
+    wait_for_project_ready()
+    cr = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.MFColsOwner.Column.Price"})
+    assert_ok(cr, "seed the column")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.MFColsOwner.Column.Price",
+        "properties": [{"name": "type",
+                        "value": {"types": [{"kind": "Number", "precision": 15, "scale": 2}]}}],
+    })
+    assert_ok(r, "set an attribute column's type")
+    assert "valueType" in (r.structured.get("applied") or []), \
+        "the type alias must apply to the column's valueType: %r" % (r.structured,)
+    poll_disk_contains(ITEM_FORM_FILE, "<precision>15</precision>",
+                       ctx="the column's Number(15,2) type must land in the form's .form on disk")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_column_type_is_rendered_by_its_platform_name():
+    # The types of a just-assigned valueType are platform PROXIES whose raw EMF `name` can be empty;
+    # rendering that raw feature would show the column's type as the bare EClass name `TypeItem`,
+    # defeating the point of the section (issue #295 review).
+    attr = "MFColRender"
+    _seed_form_attribute(attr)
+    t = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    assert_ok(t, "make it a ValueTable")
+    wait_for_project_ready()
+    c = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr + ".Column.Amount"})
+    assert_ok(c, "add the column")
+    wait_for_project_ready()
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr + ".Column.Amount",
+        "properties": [{"name": "type", "value": {"types": [{"kind": "Number", "precision": 12}]}}]})
+    assert_ok(r, "type the column")
+    wait_for_project_ready()
+
+    d = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    text = d.text or ""
+    assert_contains(text, "## Attribute columns", "the columns section must be rendered")
+    rows = [ln for ln in text.splitlines() if "Amount" in ln and "|" in ln]
+    if not rows:
+        _fail("the column row must be present: %r" % text[:400])
+    if "Number" not in rows[0]:
+        _fail("the column type must render as its platform name, not the EClass: %r" % rows[0])
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_bare_column_fqn_does_not_hit_a_visual_item():
+    # 'Column' is an ordinary two-segment kind token, so '...Form.F.Column.Name' parses - but it names
+    # no owning attribute. Left alone it fell through to the ITEM lookup and would have modified a
+    # visual item of the same name (issue #295 review). It must be refused, and the item untouched.
+    fld = "MFBareCol"
+    _seed_form_field("MFBareColAttr", fld)
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Column." + fld,
+        "properties": [{"name": "title", "value": "Hijacked", "language": "en"}],
+    })
+    e = assert_error(r, "a bare Column FQN must be refused")
+    assert_contains(e, "Attribute.<AttributeName>.Column",
+                    ctx="the refusal must show the owner-qualified column shape")
+    d = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    assert_not_contains(d.text or "", "Hijacked",
+                        ctx="the same-named visual item must NOT have been modified")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_retype_is_refused_while_columns_exist():
+    # Retyping a collection attribute to a non-collection would strand its columns - the very shape
+    # create_metadata refuses to build, and EDT does not flag it either (issue #295 review).
+    attr = "MFOrphanOwner"
+    _seed_form_attribute(attr)
+    t = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    assert_ok(t, "make it a ValueTable")
+    wait_for_project_ready()
+    c = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr + ".Column.Kept"})
+    assert_ok(c, "add a column")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "String", "length": 10}]}}]})
+    e = assert_error(r, "retyping away from a collection while columns exist must be refused")
+    assert_error_quality(e, names=["Kept"], suggests=["delete_metadata", "ValueTable"],
+                         ctx="the refusal must name the stranded columns and the two ways out")
+
+    # ValueTable -> ValueTree is collection-to-collection, so it stays allowed.
+    ok = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTree"}]}}]})
+    assert_ok(ok, "collection-to-collection retype must still be allowed")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_retype_of_a_column_carrying_a_nested_binding_follows_the_requested_type():
+    # The orphan scan fired on the mere PRESENCE of a tail, so a column with 'Rows.Product.Description'
+    # under it refused EVERY non-collection retype - including one to a REFERENCE type, whose members
+    # live in the metadata and whose deeper paths createField deliberately builds. The tool was
+    # stricter about editing a form than about creating one (issue #295 review). The verdict now
+    # follows the REQUESTED type: memberless refuses, member-owning proceeds.
+    attr, col = "MFRefCol", "Product"
+    _seed_form_attribute(attr)
+    t = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    assert_ok(t, "make it a ValueTable")
+    wait_for_project_ready()
+    c = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.%s.Column.%s" % (attr, col)})
+    assert_ok(c, "add the column")
+    wait_for_project_ready()
+    f = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.MFRefDeep",
+        "properties": [{"name": "dataPath", "value": "%s.%s.Description" % (attr, col)}]})
+    assert_ok(f, "bind a field BELOW the column (createField allows this through an untyped column)")
+    wait_for_project_ready()
+
+    column_fqn = "Catalog.Catalog.Form.ItemForm.Attribute.%s.Column.%s" % (attr, col)
+    ok = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": column_fqn,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "Ref", "ref": "Catalog.Catalog"}]}}]})
+    assert_ok(ok, "a retype to a REFERENCE keeps the nested binding resolving and must be allowed")
+    wait_for_project_ready()
+
+    # A COMPOSITE {ValueTable, Ref} keeps the tail resolving through its REFERENCE half - which is
+    # exactly why createField accepts such a path - so the collection guard must not fire on the mere
+    # presence of a collection kind (issue #295 review).
+    ok = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": column_fqn,
+        "properties": [{"name": "type", "value": {"types": [
+            {"kind": "ValueTable"}, {"kind": "Ref", "ref": "Catalog.Catalog"}]}}]})
+    assert_ok(ok, "a composite collection+reference retype must be allowed")
+    wait_for_project_ready()
+
+    # ...while a PURE collection strands the same binding and must still be refused.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": column_fqn,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    e = assert_error(r, "a PURE collection retype must still be refused")
+    assert_error_quality(e, names=["MFRefDeep"], suggests=["delete_metadata", "dataPath"],
+                         ctx="the refusal must name the item the collection would strand")
+
+    # Put the column back on a reference so the scalar case below is judged on its own.
+    ok = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": column_fqn,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "Ref", "ref": "Catalog.Catalog"}]}}]})
+    assert_ok(ok, "restore the reference type")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": column_fqn,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "String", "length": 10}]}}]})
+    e = assert_error(r, "a retype to a MEMBERLESS type must still be refused")
+    assert_error_quality(e, names=["MFRefDeep"], suggests=["delete_metadata", "dataPath"],
+                         ctx="the refusal must name the item it would strand and the two ways out")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_dynamic_list_conversion_is_refused_while_columns_exist():
+    # The dynamic-list branch retypes the attribute to DynamicList WITHOUT building a TypeDescription,
+    # so it bypassed the ordinary property path's guard and stranded the columns just the same
+    # (issue #295 review). Both doors must be shut.
+    attr = "MFDynOrphan"
+    _seed_form_attribute(attr)
+    t = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "ValueTable"}]}}]})
+    assert_ok(t, "make it a ValueTable")
+    wait_for_project_ready()
+    c = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr + ".Column.Survivor"})
+    assert_ok(c, "add a column")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr,
+        "properties": [{"name": "queryText", "value": "SELECT Catalog.Catalog.Ref FROM Catalog.Catalog"}]})
+    e = assert_error(r, "dynamic-list conversion must be refused while columns exist")
+    assert_error_quality(e, names=["Survivor"], suggests=["delete_metadata", "ValueTable"],
+                         ctx="the refusal must name the columns the conversion would strand")
+
+    d = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    assert_contains(d.text or "", "Survivor",
+                    ctx="the column must still be there after the refused conversion")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_form_addressing_error_lists_column():
+    # The addressing help an agent reads when the form cannot be resolved is the kind inventory; it
+    # must advertise Column, or the column FQN shape stays undiscoverable (issue #295).
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.NoSuchForm_zzz.Attribute.X",
+        "properties": [{"name": "title", "value": "x", "language": "en"}],
+    })
+    e = assert_error(r, "an unresolvable form is refused with the addressing help")
+    assert_contains(e, "Column", ctx="the form-addressing inventory must mention Column")
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
@@ -652,6 +1830,138 @@ def test_modify_form_missing_member_is_error():
     assert_error_quality(e, names=["NoSuchField_zz"], suggests=["not found", "get_metadata_details"],
                          ctx="a missing form member points to get_metadata_details")
     assert_no_diff("a rejected form modify must change nothing")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_form_member_addressed_with_a_foreign_kind_is_refused():
+    # Issue #343: the kind segment used to be a hint - modify_metadata on
+    # '...Button.<a field>' reported action=modified and really changed the FIELD.
+    attr, fld = "MkAttr", "ModKindFld"
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr})
+    assert_ok(r, "seed the probe attribute")
+    wait_for_project_ready()
+    poll_disk_contains(_ITEM_FORM, attr, timeout=60,
+                       ctx="the seeded attribute must be visible before the field binds to it")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field." + fld,
+        "properties": [{"name": "dataPath", "value": attr}]})
+    assert_ok(r, "seed the probe field")
+    wait_for_project_ready()
+    poll_disk_contains(_ITEM_FORM, fld, timeout=60,
+                       ctx="the seeded probe field must be on disk first")
+
+    for kind in ("Button", "Decoration", "Group", "Table", "Fielld"):
+        r = call("modify_metadata", {
+            "projectName": PROJECT,
+            "fqn": "Catalog.Catalog.Form.ItemForm.%s.%s" % (kind, fld),
+            "properties": [{"name": "title", "value": "WrongKind", "language": "en"}],
+        })
+        e = assert_error(r, "modify a form member addressed with kind '%s'" % kind)
+        assert_error_quality(e, names=[fld], suggests=["Field"],
+                             ctx="a foreign kind must name the kind the element REALLY has "
+                                 "(kind '%s')" % kind)
+        assert_contains(e, "Catalog.Catalog.Form.ItemForm.Field." + fld,
+                        "the refusal must spell the CORRECTED address (kind '%s')" % kind)
+    assert_not_contains(read_disk(_ITEM_FORM), "WrongKind",
+                        "a refused modify must not have written the title anywhere")
+
+    # The element's OWN kind still modifies it.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field." + fld,
+        "properties": [{"name": "title", "value": "RightKind", "language": "en"}],
+    })
+    assert_ok(r, "modify the field by its own kind")
+    poll_disk_contains(_ITEM_FORM, "RightKind", timeout=60,
+                       ctx="the correctly-addressed modify must land on disk")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_and_button_rebind_also_refuse_a_foreign_kind():
+    # The 'parent'/'position' MOVE branch and the 'command' button-rebind branch resolve the item
+    # through their own strict lookup, not through the property path. Issue #343 has to hold for
+    # EVERY path: before the fix these two still reached the field by NAME, so '...Button.<a field>'
+    # with a 'parent' property moved the field while the same FQN with a 'title' was refused.
+    attr, fld, grp = "MvAttr", "MoveKindFld", "MoveKindGrp"
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr})
+    assert_ok(r, "seed the probe attribute")
+    wait_for_project_ready()
+    poll_disk_contains(_ITEM_FORM, attr, timeout=60,
+                       ctx="the seeded attribute must be visible before the field binds to it")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field." + fld,
+        "properties": [{"name": "dataPath", "value": attr}]})
+    assert_ok(r, "seed the probe field")
+    wait_for_project_ready()
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group." + grp})
+    assert_ok(r, "seed the destination group")
+    wait_for_project_ready()
+    poll_disk_contains(_ITEM_FORM, fld, timeout=60, ctx="the seeded field must be on disk first")
+
+    # MOVE addressed with a foreign kind.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button." + fld,
+        "properties": [{"name": "parent", "value": grp}]})
+    e = assert_error(r, "move a form item addressed with a foreign kind")
+    assert_error_quality(e, names=[fld], suggests=["Field"],
+                         ctx="a move with a foreign kind must name the kind the item really has")
+
+    # Button command re-point addressed with a foreign kind (the field is not a Button).
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button." + fld,
+        "properties": [{"name": "command", "value": "NoSuchCmd_zz"}]})
+    e = assert_error(r, "re-point a command on an item addressed with a foreign kind")
+    assert_error_quality(e, names=[fld], suggests=["Field"],
+                         ctx="a command re-point with a foreign kind must name the actual kind")
+
+    # The item's OWN kind still moves it.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field." + fld,
+        "properties": [{"name": "parent", "value": grp}]})
+    assert_ok(r, "move the field by its own kind")
+    assert grp in (r.structured.get("destination") or ""), \
+        "the correctly-addressed move must report the destination group: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_handler_on_an_owner_of_a_foreign_kind_is_refused():
+    # The OWNER's kind of an item-level handler address is resolved too (issue #343): a rebind
+    # aimed at 'Button.<a field>' must not re-point the same-named FIELD's handler.
+    attr, fld = "RkAttr", "RebindKindFld"
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute." + attr})
+    assert_ok(r, "seed the probe attribute")
+    wait_for_project_ready()
+    poll_disk_contains(_ITEM_FORM, attr, timeout=60,
+                       ctx="the seeded attribute must be visible before the field binds to it")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field." + fld,
+        "properties": [{"name": "dataPath", "value": attr}]})
+    assert_ok(r, "seed the probe field")
+    wait_for_project_ready()
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.%s.Handler.OnChange" % fld,
+        "properties": [{"name": "procedure", "value": "RebindKindOrig_zz"}]})
+    assert_ok(r, "seed the field's OnChange handler")
+    wait_for_project_ready()
+    poll_disk_contains(_ITEM_FORM, "RebindKindOrig_zz", timeout=60,
+                       ctx="the seeded handler must be on disk first")
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Button.%s.Handler.OnChange" % fld,
+        "properties": [{"name": "procedure", "value": "RebindKindWrong_zz"}]})
+    e = assert_error(r, "rebind a handler on an owner of a foreign kind")
+    assert_error_quality(e, names=[fld], suggests=["Field"],
+                         ctx="a foreign owner kind must name the kind the owner really has")
+    assert_contains(e, "(kind 'Button')", "the refusal must name the kind that found nothing")
+    form_xml = read_disk(_ITEM_FORM)
+    assert_not_contains(form_xml, "RebindKindWrong_zz",
+                        "the refused rebind must not have re-pointed the field's handler")
+    assert_contains(form_xml, "RebindKindOrig_zz", "the original binding must survive")
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
@@ -1382,7 +2692,14 @@ def test_scheduled_job_method_name_accepts_existing_exported_server_method():
     assert r.structured.get("action") == "modified", "must report modified: %r" % (r.structured,)
     assert "methodName" in (r.structured.get("applied") or []), \
         "methodName must be applied: %r" % (r.structured,)
-    poll_diff_contains("Calc.Add", ctx="the methodName must land in the ScheduledJob .mdo on disk")
+    # The EXACT stored form, not a substring of it. A bare "Calc.Add" is accepted as INPUT and
+    # normalized to the platform's three-segment form; the short form serialized verbatim is what
+    # made an extension unloadable ("reference to an unknown method"). Asserting the substring
+    # "Calc.Add" is what let that ship - it matches both spellings.
+    poll_diff_contains("<methodName>CommonModule.Calc.Add</methodName>",
+                       ctx="the methodName must land in the .mdo in the platform's stored form")
+    assert "<methodName>Calc.Add</methodName>" not in diff(), \
+        "the short form must never reach the .mdo: %s" % diff()[:500]
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
@@ -1656,15 +2973,388 @@ def test_xdto_namespace_change_cascades_into_referencing_package():
         raise AssertionError("the result must report the propagation to E2ECascQ: %r" % msg)
 
     # Ground truth on disk: Q import + property QName carry the NEW namespace only...
-    poll_diff_contains(new_ns, ctx="Q must be rewritten to the new namespace on disk")
-    q_text = read_disk("src/XDTOPackages/E2ECascQ/Package.xdto")
+    # Wait on Q's OWN file, not on the diff: the new namespace lands in P's Package.xdto (its
+    # targetNamespace) FIRST, so a diff-wide wait can release while Q is still being exported and the
+    # read below then sees the pre-cascade content. That is a real CI failure, not a hypothetical.
+    q_rel = "src/XDTOPackages/E2ECascQ/Package.xdto"
+    poll_disk_contains(q_rel, "import namespace=" + chr(34) + new_ns + chr(34),
+                       ctx="Q must be rewritten to the new namespace on disk")
+    q_text = read_disk(q_rel)
     assert_contains(q_text, "import namespace=" + chr(34) + new_ns + chr(34),
         "Q import must point at the NEW namespace")
     if old_ns in q_text:
         raise AssertionError("no trace of the OLD namespace may remain in Q: %r" % q_text)
-    # ...and P own content (targetNamespace + the self-reference QName) moved as one.
-    p_text = read_disk("src/XDTOPackages/E2ECascP/Package.xdto")
+    # ...and P own content (targetNamespace + the self-reference QName) moved as one. P has its OWN
+    # wait: the two packages are exported as separate files, so Q landing says nothing about P - a
+    # CI run failed here with P still holding the old targetNamespace while Q was already rewritten.
+    p_rel = "src/XDTOPackages/E2ECascP/Package.xdto"
+    poll_disk_contains(p_rel, "targetNamespace=" + chr(34) + new_ns + chr(34),
+                       ctx="P own targetNamespace must move on disk")
+    p_text = read_disk(p_rel)
     assert_contains(p_text, "targetNamespace=" + chr(34) + new_ns + chr(34),
         "P own targetNamespace must move")
     if old_ns in p_text:
         raise AssertionError("P own self-reference must be rewritten too: %r" % p_text)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Localized properties must name a DECLARED locale — issue #298.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_rejects_a_localized_property_in_an_undeclared_locale():
+    """Issue #298: modify_metadata accepted any 'language' code and stored the value under it, where
+    nothing ever reads it. The fixture declares only 'en'."""
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Marchandises", "language": "fr_CA"}],
+    })
+    e = assert_error(r, "a localized property in an undeclared locale must be refused")
+    assert_error_quality(e, names=["fr_CA"], suggests=["en"],
+                         ctx="the error must name the bad code AND list what the configuration declares")
+    assert_no_diff("a rejected localized write must not change the project")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_reports_the_locale_used_and_the_ones_still_untranslated():
+    # Issue #298 parts 2-3. A second language is added, then the SAME property is translated into
+    # it - proving the report is read from the object (a modify target may already carry other
+    # translations), not guessed. The fixture's configuration is named in 'en' only, so that second
+    # language is declared but NOT in use: it is not owed a translation, and writing into it is
+    # flagged instead, so the agent asks the user before populating it.
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298FrOnModify"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298FrOnModify",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Goods", "language": "en"}],
+    })
+    assert_ok(r, "set the synonym in the first declared locale")
+    assert r.structured.get("language") == "en", \
+        "the result must echo the locale used: %r" % (r.structured,)
+    assert r.structured.get("localesMissing") == [], \
+        "a language the configuration is not translated into is not owed one: %r" % (r.structured,)
+    assert "localeUnusedInConfiguration" not in r.structured, \
+        "a write in the language the configuration DOES use must not be questioned: %r" % (r.structured,)
+    wait_for_project_ready()
+
+    r2 = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Marchandises", "language": "fr"}],
+    })
+    assert_ok(r2, "translate the same property into the second locale")
+    assert r2.structured.get("localesMissing") == [], \
+        "with every locale in USE translated the list must be empty: %r" % (r2.structured,)
+    assert r2.structured.get("localeUnusedInConfiguration") is True, \
+        "writing into a language the configuration does not use must be flagged: %r" % (r2.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_reports_the_locales_left_holding_the_previous_text():
+    # The case the rule is really about: you RENAME a synonym in one language and the other
+    # languages keep the old wording. They are not "missing" - they have a value - so only a
+    # separate list can surface them.
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298StaleFr"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298StaleFr",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    # Both languages carry a synonym...
+    for code, text in (("en", "Goods"), ("fr", "Marchandises")):
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog",
+            "properties": [{"name": "synonym", "value": text, "language": code}]}),
+            "seed the synonym in %s" % code)
+        wait_for_project_ready()
+
+    # ... and now only ONE of them is renamed: the other still says "Marchandises".
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Wares", "language": "en"}],
+    })
+    assert_ok(r, "rename the synonym in one language only")
+    assert r.structured.get("localesStale") == ["fr"], \
+        "the language left holding the previous text must be reported: %r" % (r.structured,)
+    assert r.structured.get("localesMissing") == [], \
+        "a language that HAS text is not missing one: %r" % (r.structured,)
+    wait_for_project_ready()
+
+    # Writing both in one call leaves nothing behind.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Items", "language": "en"},
+                       {"name": "synonym", "value": "Articles", "language": "fr"}],
+    })
+    assert_ok(r, "translate both languages in the same call")
+    assert "localesStale" not in r.structured, \
+        "a language written by the same call is not stale: %r" % (r.structured,)
+    wait_for_project_ready()
+
+    # COMPLETING a translation is not the same as changing one: filling a language that was empty
+    # leaves the others exactly as current as they were, so nothing went stale. (The attribute is
+    # used here because its synonym has no text in either language yet.)
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute.Attribute",
+        "properties": [{"name": "synonym", "value": "Titre", "language": "fr"}],
+    })
+    assert_ok(r, "fill in a language this property had no text in")
+    assert "localesStale" not in r.structured, \
+        "filling a missing translation must not make the others stale: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_rewriting_the_same_text_does_not_report_stale():
+    # Idempotent rewrite: writing the EXACT SAME text again is not a replace - the other language's
+    # translation still describes the current value, so it must not be reported stale (the old
+    # behaviour flagged the other language on every rewrite, whatever the value - issue #298 review).
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298IdemStaleFr"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298IdemStaleFr",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    # Both languages carry a synonym...
+    for code, text in (("en", "Goods"), ("fr", "Marchandises")):
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog",
+            "properties": [{"name": "synonym", "value": text, "language": code}]}),
+            "seed the synonym in %s" % code)
+        wait_for_project_ready()
+
+    # ... and now 'en' is written again with the IDENTICAL text: nothing actually changed, so 'fr'
+    # still describes the current value and must not be flagged as stale.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Goods", "language": "en"}],
+    })
+    assert_ok(r, "rewrite the synonym with the identical text")
+    # A positive signal FIRST: the localized-write report engine actually ran (not silently absent -
+    # a broken/no-op report would also satisfy a bare "not in" check below).
+    assert r.structured.get("language") == "en", \
+        "the localized report must have run for this write: %r" % (r.structured,)
+    assert "localesStale" not in r.structured, \
+        "rewriting the SAME text must not mark the other language stale: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_putting_the_old_text_back_in_one_call_reports_nothing_stale():
+    # A batch may write the same property and language more than once. What can make another
+    # language out of date is where the value ENDS UP, not what it passed through: writing a new
+    # name and then putting the original back leaves the property exactly as it was.
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298BackFr"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298BackFr",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+    for code, text in (("en", "Goods"), ("fr", "Marchandises")):
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog",
+            "properties": [{"name": "synonym", "value": text, "language": code}]}),
+            "seed the synonym in %s" % code)
+        wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "synonym", "value": "Wares", "language": "en"},
+                       {"name": "synonym", "value": "Goods", "language": "en"}],
+    })
+    assert_ok(r, "change the synonym and put the original back in the same call")
+    assert "localesStale" not in r.structured, \
+        "the value ended where it started, so nothing behind it went stale: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_cross_property_locales_stale_are_reported_per_property():
+    # Two DIFFERENT localized properties on the SAME form member: change 'title' in en and 'toolTip'
+    # in fr in ONE call. Staleness is decided PER PROPERTY, so title's untouched 'fr' and toolTip's
+    # untouched 'en' must BOTH surface. The old behaviour excluded every language the call touched
+    # ANYWHERE (a project-wide set), which would wrongly hide both - title never touched fr, and
+    # toolTip never touched en, so neither is "a language this call wrote".
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298CrossPropFr"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298CrossPropFr",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    fqn = "Catalog.Catalog.Form.ItemForm.Field.Description"
+    # Seed BOTH 'title' and 'toolTip' in BOTH languages first (get_metadata_details(assignable:true)
+    # on this fqn lists 'toolTip' as its own LOCALIZED_STRING property, distinct from 'title').
+    for code, title_text, tip_text in (("en", "Description", "Enter a description"),
+                                        ("fr", "Description FR", "Entrez une description")):
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": fqn,
+            "properties": [{"name": "title", "value": title_text, "language": code},
+                           {"name": "toolTip", "value": tip_text, "language": code}]}),
+            "seed title + toolTip in %s" % code)
+        wait_for_project_ready()
+
+    # One call: change 'title' in en AND 'toolTip' in fr, both to NEW values.
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": fqn,
+        "properties": [{"name": "title", "value": "New description", "language": "en"},
+                       {"name": "toolTip", "value": "Nouvelle description", "language": "fr"}],
+    })
+    assert_ok(r, "change title(en) and toolTip(fr) in the same call")
+    assert r.structured.get("localesMissing") == [], \
+        "every in-use language already has text for both properties: %r" % (r.structured,)
+    stale = sorted(r.structured.get("localesStale") or [])
+    assert stale == ["en", "fr"], \
+        "title's untouched fr AND toolTip's untouched en must both be reported stale: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_without_a_localized_property_reports_no_locales():
+    # The localized report belongs to a localized write: a plain scalar edit must not grow the
+    # payload (its absence is what tells a caller no localized value was touched).
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [{"name": "comment", "value": "plain scalar edit"}],
+    })
+    assert_ok(r, "a scalar-only modify")
+    assert "localesMissing" not in r.structured, \
+        "a non-localized modify must not report locales: %r" % (r.structured,)
+    assert "language" not in r.structured, \
+        "a non-localized modify must not echo a locale: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_form_member_reports_the_locale_used_and_the_ones_still_untranslated():
+    # A form member's title is a localized property, and that path builds its OWN result - it must
+    # carry the same report as the mdclass path (issue #298).
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298FrOnFormMember"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298FrOnFormMember",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.Description",
+        "properties": [{"name": "title", "value": "Description", "language": "en"}],
+    })
+    assert_ok(r, "set a form field's title")
+    assert r.structured.get("language") == "en",         "the form-member modify must echo the locale used: %r" % (r.structured,)
+    assert r.structured.get("localesMissing") == [],         "the form-member modify must carry the report - empty, the second language is unused: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_form_member_rejects_a_title_in_an_undeclared_locale():
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.Description",
+        "properties": [{"name": "title", "value": "Libellé", "language": "fr_CA"}],
+    })
+    e = assert_error(r, "a form-member title in an undeclared locale must be refused")
+    assert_error_quality(e, names=["fr_CA"], suggests=["en"],
+                         ctx="the form-member path must give the same actionable error")
+    assert_no_diff("a rejected localized write must not change the project")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_accepts_a_locale_the_same_batch_declares():
+    # One batch may set a Language's languageCode AND a localized value under that very code. The
+    # undeclared-locale guard must not reject the second half of an edit whose first half declares
+    # the code - the whole batch is validated before anything is written (issue #298, review).
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298Atomic"}),
+              "add the language object")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Language.Z298Atomic",
+        "properties": [
+            {"name": "languageCode", "value": "fr"},
+            {"name": "synonym", "value": "Francais", "language": "fr"},
+        ],
+    })
+    assert_ok(r, "declare a language code and use it in the SAME call")
+    applied = r.structured.get("applied") or []
+    assert "languageCode" in applied and "synonym" in applied,         "both properties must be applied: %r" % (r.structured,)
+    assert r.structured.get("language") == "fr",         "the result must echo the just-declared locale: %r" % (r.structured,)
+    # The code this very batch declares is judged by the SAME rule as any other: the configuration
+    # is not named in it, so the write is flagged for the agent to ask about rather than refused.
+    assert r.structured.get("localeUnusedInConfiguration") is True,         "a write under the just-declared, unused locale must be flagged: %r" % (r.structured,)
+    wait_for_project_ready()
+
+    # A code that NOBODY declares - neither the model nor this batch - is still refused.
+    bad = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Language.Z298Atomic",
+        "properties": [
+            {"name": "languageCode", "value": "fr"},
+            {"name": "synonym", "value": "Deutsch", "language": "de"},
+        ],
+    })
+    e = assert_error(bad, "a code neither declared nor pending must still be refused")
+    assert_error_quality(e, names=["de"], suggests=["fr"],
+                         ctx="the pending code must be listed among the available ones")
+    wait_for_project_ready()
+
+    # And the mirror case: a batch that RENAMES this language's code must not accept the code it
+    # removes - after it, nothing declares 'fr' any more, so a value written under it is invisible.
+    removed = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Language.Z298Atomic",
+        "properties": [
+            {"name": "languageCode", "value": "it"},
+            {"name": "synonym", "value": "Francais", "language": "fr"},
+        ],
+    })
+    e2 = assert_error(removed, "the code the batch removes must be refused")
+    assert_error_quality(e2, names=["fr"], suggests=["it"],
+                         ctx="the error must name the removed code and list the post-batch ones")
+
+
+# ===== a 64-bit (ELong) property (#451) ======================================================
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_long_property_is_advertised_as_long_and_accepts_64_bit_values():
+    # WebService.sessionMaxAge and HTTPService.sessionMaxAge are the ONLY long-typed properties in
+    # the whole mdclass metamodel, so this fixture HTTP service is the only place the long path can
+    # be exercised at all. Before the fix the property was not merely mistyped - it was unsettable:
+    # the prepared value was an Integer and EMF refused the eSet outright with "The value of type
+    # 'class java.lang.Integer' must be of type 'class java.lang.Long'".
+    fqn = "HTTPService.ProbeService"
+    assert_contains(_assignable_text(fqn), "| sessionMaxAge | LONG |",
+                    "a 64-bit property must be advertised as LONG, not INTEGER")
+
+    r = call("modify_metadata", {"projectName": PROJECT, "fqn": fqn,
+                                 "properties": [{"name": "sessionMaxAge", "value": "600"}]})
+    assert_ok(r, "set sessionMaxAge to an in-range value")
+    assert_contains(_assignable_text(fqn), "| sessionMaxAge | LONG | 600 |",
+                    "the model must read back the value that was just set")
+
+    # A value no int can hold. The old range guard refused it as "not a valid integer", so this is
+    # the assertion that pins the widened range rather than only the wrapper type.
+    beyond_int = str(2 ** 31)
+    r = call("modify_metadata", {"projectName": PROJECT, "fqn": fqn,
+                                 "properties": [{"name": "sessionMaxAge", "value": beyond_int}]})
+    assert_ok(r, "set sessionMaxAge beyond the 32-bit range")
+    assert_contains(_assignable_text(fqn), "| sessionMaxAge | LONG | %s |" % beyond_int,
+                    "a 64-bit value must survive the round-trip through the model")
+    poll_disk_contains("src/HTTPServices/ProbeService/ProbeService.mdo",
+                       "<sessionMaxAge>%s</sessionMaxAge>" % beyond_int,
+                       ctx="the 64-bit value must reach the exported .mdo, not only the model")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_fractional_value_for_a_long_property_is_refused_actionably():
+    # The widened range must not turn into "anything numeric goes": a fractional value is still not
+    # a whole 64-bit number, and the error has to say which kind of number is expected.
+    r = call("modify_metadata", {"projectName": PROJECT, "fqn": "HTTPService.ProbeService",
+                                 "properties": [{"name": "sessionMaxAge", "value": "1.5"}]})
+    assert_error(r, "a fractional value is not a whole 64-bit number")
+    assert_contains(r.text, "64-bit", "the error must name the kind of number it expected")
+    assert_no_diff("a refused property must not touch the project on disk")

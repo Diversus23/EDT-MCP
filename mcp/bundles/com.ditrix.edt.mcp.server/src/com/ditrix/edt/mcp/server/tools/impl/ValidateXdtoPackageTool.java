@@ -62,14 +62,10 @@ public class ValidateXdtoPackageTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Validate a single XDTO package by running EDT's OWN configuration validation " //$NON-NLS-1$
-            + "(the same check engine behind get_project_errors) scoped to that package, and " //$NON-NLS-1$
-            + "return a pass/fail verdict plus any problems found (e.g. a dangling reference to a " //$NON-NLS-1$
-            + "deleted ObjectType). It reflects the LATEST validation state already computed by " //$NON-NLS-1$
-            + "EDT (reads existing markers) rather than forcing a fresh compile; run " //$NON-NLS-1$
-            + "revalidate_objects first if you need up-to-the-second results. Does not implement " //$NON-NLS-1$
-            + "any XDTO-specific rule itself - it is a scoped view over get_project_errors. " //$NON-NLS-1$
-            + "Full parameters and examples: call get_tool_guide('validate_xdto_package')."; //$NON-NLS-1$
+        return "Check an XDTO package for configuration validation problems. Reads the markers EDT " //$NON-NLS-1$
+            + "computed EARLIER - it does not validate on demand, so a verdict right after an edit " //$NON-NLS-1$
+            + "can be stale; run revalidate_objects first when you need it current. Parameters and " //$NON-NLS-1$
+            + "examples: get_tool_guide('validate_xdto_package')."; //$NON-NLS-1$
     }
 
     @Override
@@ -80,7 +76,8 @@ public class ValidateXdtoPackageTool implements IMcpTool
                 "EDT project name (required).", true) //$NON-NLS-1$
             .stringProperty("fqn", //$NON-NLS-1$
                 "FQN of the XDTO package to validate, as 'XDTOPackage.<Name>' (required). Must " //$NON-NLS-1$
-                + "already exist; check with get_metadata_objects.", true) //$NON-NLS-1$
+                + "already exist; list the packages with " //$NON-NLS-1$
+                + "get_metadata_objects(metadataType: 'xdtoPackages').", true) //$NON-NLS-1$
             .integerProperty(McpKeys.LIMIT, "Max problem rows to report; default 100, max 1000 (optional)") //$NON-NLS-1$
             .build();
     }
@@ -121,8 +118,9 @@ public class ValidateXdtoPackageTool implements IMcpTool
         {
             return ToolResult.error("Not an XDTOPackage: '" + fqn + "'. validate_xdto_package only " //$NON-NLS-1$ //$NON-NLS-2$
                 + "validates an existing XDTO package top object, addressed as 'XDTOPackage.<Name>'. " //$NON-NLS-1$
-                + "Check the name with get_metadata_objects, or call get_project_errors directly for " //$NON-NLS-1$
-                + "a general (not XDTO-scoped) problem query.").toJson(); //$NON-NLS-1$
+                + "List the packages with get_metadata_objects(metadataType: 'xdtoPackages'), or " //$NON-NLS-1$
+                + "call get_project_errors directly for a general (not XDTO-scoped) problem " //$NON-NLS-1$
+                + "query.").toJson(); //$NON-NLS-1$
         }
 
         // Scope by the RESOLVED package's canonical FQN (not the raw input): this ignores a
@@ -137,7 +135,8 @@ public class ValidateXdtoPackageTool implements IMcpTool
     }
 
     /**
-     * Prepends a one-line pass/fail verdict to the {@code get_project_errors} Markdown result,
+     * Prepends a one-line verdict to the {@code get_project_errors} Markdown result: valid,
+     * problems found, or - when nothing matched but a marker's location was unresolvable - undecided,
      * derived from whether it opens with the "No Errors Found" heading. A JSON error payload
      * (e.g. the marker manager being unavailable) is returned verbatim - it is a whole-call
      * failure, not a validation outcome, so it gets no verdict wrapping.

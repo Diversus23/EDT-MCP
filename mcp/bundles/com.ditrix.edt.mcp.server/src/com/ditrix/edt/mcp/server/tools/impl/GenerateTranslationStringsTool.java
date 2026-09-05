@@ -74,12 +74,12 @@ public class GenerateTranslationStringsTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Generate translation strings (.lstr/.trans/.dict) for a configuration " //$NON-NLS-1$
-             + "project: scans translatable features and writes the resulting keys into " //$NON-NLS-1$
-             + "the project's storages (EDT menu Translation -> Generate translation " //$NON-NLS-1$
-             + "strings). Run on the configuration project (V8ConfigurationNature), not " //$NON-NLS-1$
-             + "a dictionary storage project; requires LanguageTool installed in EDT. " //$NON-NLS-1$
-             + "Full parameters and examples: call get_tool_guide('generate_translation_strings')."; //$NON-NLS-1$
+        return "Collect translatable strings of a configuration and WRITE the generated keys into the " //$NON-NLS-1$
+            + "project's translation storage (.lstr/.trans/.dict; storageId, default 'edit:default'). " //$NON-NLS-1$
+            + "This changes project files - it is not a read-only scan. Run it on the configuration " //$NON-NLS-1$
+            + "project (V8ConfigurationNature), not a dictionary storage project; requires LanguageTool " //$NON-NLS-1$
+            + "installed in EDT. Parameters and examples: " //$NON-NLS-1$
+            + "get_tool_guide('generate_translation_strings')."; //$NON-NLS-1$
     }
 
     @Override
@@ -127,6 +127,8 @@ public class GenerateTranslationStringsTool implements IMcpTool
             return opts.error;
         }
 
+        boolean mutationApiEntered = false;
+        boolean mutationApiReturned = false;
         try
         {
             // Resolve the configuration project and the LanguageTool API (no side
@@ -152,6 +154,7 @@ public class GenerateTranslationStringsTool implements IMcpTool
             Method method = resolved.api.getClass().getMethod("generateTranslationStrings", //$NON-NLS-1$
                 IDtProject.class, List.class, String.class, String.class, Path.class,
                 boolean.class, boolean.class, String.class, boolean.class, Map.class);
+            mutationApiEntered = true;
             method.invoke(resolved.api,
                 resolved.dtProject,
                 targetLanguages,
@@ -163,6 +166,7 @@ public class GenerateTranslationStringsTool implements IMcpTool
                 opts.collectModelType,
                 Boolean.FALSE,
                 Collections.emptyMap());
+            mutationApiReturned = true;
 
             BuildUtils.waitForDerivedData(resolved.project);
 
@@ -180,7 +184,16 @@ public class GenerateTranslationStringsTool implements IMcpTool
         }
         catch (Exception e)
         {
-            return CliReflectionErrors.toErrorJson(e, "Generate translation strings", "LanguageTool"); //$NON-NLS-1$ //$NON-NLS-2$
+            String error = CliReflectionErrors.toErrorJson(e,
+                "Generate translation strings", "LanguageTool"); //$NON-NLS-1$ //$NON-NLS-2$
+            // LanguageTool exposes no transaction/rollback outcome. Once invoke() was entered an
+            // exception can follow a partial dictionary/model write, so state the uncertainty
+            // structurally instead of pretending this was a preflight refusal.
+            if (mutationApiReturned)
+            {
+                return ToolResult.markErrorAfterMutation(error);
+            }
+            return mutationApiEntered ? ToolResult.markErrorWithUnknownMutationOutcome(error) : error;
         }
     }
 

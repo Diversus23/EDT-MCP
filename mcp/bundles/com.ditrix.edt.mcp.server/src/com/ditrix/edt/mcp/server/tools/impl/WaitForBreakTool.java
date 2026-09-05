@@ -75,13 +75,8 @@ public class WaitForBreakTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Wait for a debug suspend event (e.g. breakpoint hit) on the given application. " //$NON-NLS-1$
-            + "Returns the suspended thread/frame snapshot, or {hit:false} on timeout. " //$NON-NLS-1$
-            + "applicationId accepts ANY id form for the session: the real id, 'attach:<name>', " //$NON-NLS-1$
-            + "'launch:<name>' (EDT-UI-started session), or 'ServerApplication.<app>' (server-side " //$NON-NLS-1$
-            + "suspend from debug_yaxunit_tests). " //$NON-NLS-1$
-            + "If omitted and exactly one EDT debug session is active, that session is used. " //$NON-NLS-1$
-            + "Does NOT terminate the launch on timeout — call again to keep waiting."; //$NON-NLS-1$
+        return "Wait until a running 1C debug session reaches a breakpoint or other suspend event. " //$NON-NLS-1$
+            + "Parameters and examples: get_tool_guide('wait_for_break')."; //$NON-NLS-1$
     }
 
     @Override
@@ -171,7 +166,7 @@ public class WaitForBreakTool implements IMcpTool
 
         // Proactively scan live targets for threads already suspended before the
         // listener was registered (e.g. manual breakpoint hit in EDT, or suspend
-        // that happened between debug_launch and this call).
+        // that happened between launch and this call).
         scanForAlreadySuspended(registry, applicationId);
 
         try

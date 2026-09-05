@@ -22,10 +22,23 @@ import com.ditrix.edt.mcp.server.preferences.ToolSettingsService;
  */
 public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service / getInstance); a single instance is by design
 {
+    /** Legacy call names accepted by {@link #getTool(String)} but never advertised. */
+    private static final Map<String, String> LEGACY_TOOL_NAMES = Map.of(
+        "debug_launch", "launch"); //$NON-NLS-1$ //$NON-NLS-2$
+
     private static final McpToolRegistry INSTANCE = new McpToolRegistry();
-    
-    private final Map<String, IMcpTool> tools = new ConcurrentHashMap<>();
-    
+
+    /**
+     * The live catalogue, REPLACED as a whole rather than emptied and refilled.
+     * <p>
+     * Readers - {@code tools/list}, {@code tools/call} and the in-process bridge - run
+     * concurrently with a server restart, which re-registers every tool. Refilling in place
+     * would let them observe an empty or half-populated catalogue and report an existing tool
+     * as unknown, so a bulk update publishes a finished map instead: every reader sees either
+     * the whole previous catalogue or the whole new one.
+     */
+    private volatile Map<String, IMcpTool> tools = new ConcurrentHashMap<>();
+
     private McpToolRegistry()
     {
         // Private constructor for singleton
@@ -55,7 +68,37 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
         tools.put(tool.getName(), tool);
         Activator.logInfo("Registered MCP tool: " + tool.getName()); //$NON-NLS-1$
     }
-    
+
+    /**
+     * Replaces the whole catalogue in one step.
+     * <p>
+     * This is what a (re)start must use instead of {@link #clear()} followed by
+     * {@link #register(IMcpTool)} per tool: a concurrent {@code tools/list} would otherwise
+     * see the gap between the two and answer with a partial catalogue, and a concurrent
+     * {@code tools/call} would report a tool that exists as unknown.
+     *
+     * @param replacement the tools to publish; {@code null} entries and unnamed tools are
+     *            ignored, a {@code null} collection empties the registry
+     */
+    public void replaceAll(Collection<IMcpTool> replacement)
+    {
+        Map<String, IMcpTool> published = new ConcurrentHashMap<>();
+        if (replacement != null)
+        {
+            for (IMcpTool tool : replacement)
+            {
+                if (tool == null || tool.getName() == null)
+                {
+                    continue;
+                }
+                published.put(tool.getName(), tool);
+                Activator.logInfo("Registered MCP tool: " + tool.getName()); //$NON-NLS-1$
+            }
+        }
+        // The single point where readers switch over, and they switch over completely.
+        tools = published;
+    }
+
     /**
      * Returns a tool by name.
      * 
@@ -64,7 +107,13 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
      */
     public IMcpTool getTool(String name)
     {
-        return tools.get(name);
+        IMcpTool tool = tools.get(name);
+        if (tool != null)
+        {
+            return tool;
+        }
+        String currentName = LEGACY_TOOL_NAMES.get(name);
+        return currentName == null ? null : tools.get(currentName);
     }
     
     /**
@@ -147,8 +196,9 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
         {
             return false;
         }
-        return tools.containsKey(name)
-            && ToolSettingsService.getInstance().isToolEnabled(name);
+        IMcpTool tool = getTool(name);
+        return tool != null
+            && ToolSettingsService.getInstance().isToolEnabled(tool.getName());
     }
     
     /**
@@ -163,9 +213,12 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
     
     /**
      * Clears all registered tools.
+     * <p>
+     * To REPLACE the catalogue use {@link #replaceAll(Collection)}: clearing and re-registering
+     * exposes the empty state in between.
      */
     public void clear()
     {
-        tools.clear();
+        tools = new ConcurrentHashMap<>();
     }
 }

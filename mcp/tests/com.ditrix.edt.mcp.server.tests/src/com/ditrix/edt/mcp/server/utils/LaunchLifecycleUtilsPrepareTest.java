@@ -21,8 +21,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.debug.core.ILaunch;
@@ -62,12 +66,20 @@ public class LaunchLifecycleUtilsPrepareTest
         // settle-before-decide window (default 5s) would make each terminate test
         // sleep needlessly. 20ms settle keeps these terminate-phase tests fast.
         LaunchLifecycleUtils.setSyncTimingsForTest(20L, 200L, 5L);
+        // The change gate is static state shared with every other test in the JVM: start from
+        // the production bindings and an empty dirty map, so a verdict left behind by another
+        // class cannot decide this class's phases.
+        PreLaunchChangeTracker.resetForTest();
     }
 
     @After
     public void restoreTimings()
     {
         LaunchLifecycleUtils.resetSyncTimingsForTest();
+        // The change gate is static state shared with every other test in the JVM: restore the
+        // production fingerprinter/store/disk-sync and drop the dirty map, or a scope this class
+        // prepared would decide another class's verdict.
+        PreLaunchChangeTracker.resetForTest();
     }
 
     private static IProject mockOpenProject()
@@ -369,5 +381,157 @@ public class LaunchLifecycleUtilsPrepareTest
         assertEquals("the stale launch must still be swept", 1, result.getTerminatedCount());
         verify(runtimeLaunch, atLeastOnce()).terminate();
         verify(mgr, never()).update(any(), any(), any(), any());
+    }
+
+    // ============ #357 — the published phase must describe what is running NOW ============
+
+    @Test
+    public void testEachStageIsPublishedOnEntryNotAfterItFinished() throws Exception
+    {
+        // #357: the phase a Pending reports is the only thing a polling caller can act on, and it
+        // was fiction — stamped "recompute" before the whole chain and "db-update" only AFTER the
+        // chain had already returned. So every Pending said "recompute" whatever the server was
+        // doing, and "db-update" was reachable only when there was nothing left to wait for.
+        //
+        // Order alone would not catch a label written on EXIT (the sequence is the same), so the
+        // update mock records what the phase said WHILE the update was running.
+        List<String> stages = new ArrayList<>();
+        AtomicReference<String> phaseDuringUpdate = new AtomicReference<>();
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenAnswer(inv -> {
+            phaseDuringUpdate.set(stages.isEmpty() ? null : stages.get(stages.size() - 1));
+            return ApplicationUpdateState.UPDATED;
+        });
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2, null,
+            ExternalInfobaseChangesPolicy.DEFAULT, stages::add);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        assertEquals("every stage must be published, in the order it runs",
+            Arrays.asList(LaunchLifecycleUtils.PHASE_TERMINATE,
+                LaunchLifecycleUtils.PHASE_CHECK_CHANGES, LaunchLifecycleUtils.PHASE_RECOMPUTE,
+                LaunchLifecycleUtils.PHASE_DB_UPDATE),
+            stages);
+        assertEquals("the db-update label must be published BEFORE the update runs, not after it "
+            + "finished — a caller told 'recompute' while the infobase is being written is being "
+            + "pointed at the wrong stage",
+            LaunchLifecycleUtils.PHASE_DB_UPDATE, phaseDuringUpdate.get());
+    }
+
+    // ============ #310 — "recompute" must not be announced before the gate decides ============
+
+    /**
+     * Wires the change gate so the scope reads as CHANGED, recording the phase that was live at
+     * the moment the gate asked for the project's fingerprint — i.e. while the decision was
+     * still being made.
+     */
+    private void wireGate(String currentFingerprint, String preparedFingerprint,
+            List<String> stages, AtomicReference<String> phaseDuringDetection)
+    {
+        PreLaunchChangeTracker.setDiskSyncForTest(project -> true);
+        PreLaunchChangeTracker.setStoreForTest(new PreLaunchChangeTracker.FingerprintStore() {
+            @Override
+            public String load(IProject project)
+            {
+                return preparedFingerprint;
+            }
+
+            @Override
+            public void save(IProject project, String fingerprint)
+            {
+                // The prepared marker is not what these tests assert.
+            }
+
+            @Override
+            public void clear(IProject project)
+            {
+                // The prepared marker is not what these tests assert.
+            }
+        });
+        PreLaunchChangeTracker.setFingerprinterForTest(project -> {
+            phaseDuringDetection.set(stages.isEmpty() ? null : stages.get(stages.size() - 1));
+            return currentFingerprint;
+        });
+    }
+
+    @Test
+    public void testChangeGateRunsUnderItsOwnPhaseNotUnderRecompute() throws Exception
+    {
+        // #310: "recompute" was published BEFORE the gate had decided anything, so the first
+        // Pending of every preparation announced a full rebuild - including the preparations
+        // that went on to skip it. Order alone would not catch that (the sequence still ends in
+        // a recompute here), so the fingerprinter - which the gate calls while deciding -
+        // records what the phase said AT THAT MOMENT.
+        List<String> stages = new ArrayList<>();
+        AtomicReference<String> phaseDuringDetection = new AtomicReference<>();
+        wireGate("fp-now", null, stages, phaseDuringDetection); // never prepared -> changed
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null,
+            ExternalInfobaseChangesPolicy.DEFAULT, stages::add);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        assertEquals("a changed scope must still reach the recompute, and only after the gate",
+            Arrays.asList(LaunchLifecycleUtils.PHASE_TERMINATE,
+                LaunchLifecycleUtils.PHASE_CHECK_CHANGES, LaunchLifecycleUtils.PHASE_RECOMPUTE,
+                LaunchLifecycleUtils.PHASE_DB_UPDATE),
+            stages);
+        assertEquals("while the gate is still deciding, the phase must name the gate - a caller "
+            + "told 'recompute' there is being promised work that may never run",
+            LaunchLifecycleUtils.PHASE_CHECK_CHANGES, phaseDuringDetection.get());
+    }
+
+    @Test
+    public void testUnchangedScopeNeverPublishesRecompute() throws Exception
+    {
+        // The reporter's case: nothing changed, the gate skips the recompute entirely (#377) -
+        // and the label still said "recompute", which is what made a skipped rebuild look like a
+        // permanent one. An unchanged scope must never publish that label at all.
+        List<String> stages = new ArrayList<>();
+        AtomicReference<String> phaseDuringDetection = new AtomicReference<>();
+        wireGate("fp-same", "fp-same", stages, phaseDuringDetection); // prepared at this content
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null,
+            ExternalInfobaseChangesPolicy.DEFAULT, stages::add);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        assertFalse("a preparation that recomputes nothing must never publish 'recompute': "
+            + stages, stages.contains(LaunchLifecycleUtils.PHASE_RECOMPUTE));
+        assertEquals("the unchanged scope gets the gate and then the cheap drain",
+            Arrays.asList(LaunchLifecycleUtils.PHASE_TERMINATE,
+                LaunchLifecycleUtils.PHASE_CHECK_CHANGES, LaunchLifecycleUtils.PHASE_SETTLE,
+                LaunchLifecycleUtils.PHASE_DB_UPDATE),
+            stages);
+        assertEquals("the gate must still run under its own phase",
+            LaunchLifecycleUtils.PHASE_CHECK_CHANGES, phaseDuringDetection.get());
+    }
+
+    @Test
+    public void testPhaseSinkIsOptionalForCallersThatDoNotReportProgress() throws Exception
+    {
+        // The 7-argument overload (launch and friends) must keep working unchanged.
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
+
+        assertTrue("a caller without a phase sink must still succeed: " + result.getError(),
+            result.isOk());
     }
 }

@@ -23,6 +23,7 @@ import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolCallResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolsListResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.utils.DcsXmlCodec;
 import com.ditrix.edt.mcp.server.utils.GuideRenderer;
 import com.ditrix.edt.mcp.server.utils.InfobaseAuthDialogSuppressor;
 import com.ditrix.edt.mcp.server.utils.Log;
@@ -55,6 +56,29 @@ public class McpProtocolHandler
 
     /** JSON key flagging a structured success/failure outcome. */
     private static final String KEY_SUCCESS = "success"; //$NON-NLS-1$
+
+    /** Maximum user-authored signal text retained in a tool result, including the ellipsis. */
+    public static final int MAX_USER_SIGNAL_MESSAGE_CHARS = 512;
+
+    /**
+     * Maximum serialized growth when {@code userSignal} is added to a non-empty JSON object.
+     * The fixed member {@code ,"userSignal":{"type":"BACKGROUND","message":""}} is 48
+     * characters (BACKGROUND is the longest enum token), and any one of the 512 retained UTF-16
+     * characters may require a six-character JSON Unicode escape: {@code 48 + 512 * 6 = 3120}.
+     * XML paging reserves exactly this amount before the protocol can append the member.
+     */
+    public static final int MAX_USER_SIGNAL_JSON_AUGMENTATION_CHARS =
+        48 + MAX_USER_SIGNAL_MESSAGE_CHARS * 6;
+
+    /**
+     * Maximum Markdown growth after tool execution: the fixed
+     * {@code \n\n---\n**USER SIGNAL:** } banner is 23 characters and the retained message is at
+     * most 512, so {@code 23 + 512 = 535}. DCS Markdown paging reserves this exact headroom.
+     */
+    public static final int MAX_MARKDOWN_USER_SIGNAL_AUGMENTATION_CHARS =
+        23 + MAX_USER_SIGNAL_MESSAGE_CHARS;
+
+    private static final String USER_SIGNAL_ELLIPSIS = "\u2026"; //$NON-NLS-1$
 
     private final McpToolRegistry toolRegistry;
 
@@ -143,8 +167,43 @@ public class McpProtocolHandler
                 // Intentionally swallowed — the wire path must be unaffected by the
                 // recorder (see the contract above).
             }
+
+            // Counted in its OWN guard, not the recorder's: the recorder is allowed to
+            // fail (a supported, tested path), and sharing one catch let a recorder
+            // failure silently stop the status bar from counting.
+            try
+            {
+                countRequest();
+            }
+            catch (Exception countingFailure) // NOSONAR: the counter must never break a call
+            {
+                // Same contract as the recorder above.
+            }
         }
         return response;
+    }
+
+    /**
+     * Counts one processed request for the status bar, at the same choke point as the
+     * history.
+     * <p>
+     * It deliberately does NOT live in the HTTP handler: requests also arrive through
+     * the in-process bridge, and counting them at the transport made the status bar
+     * stand still while Workmate was driving tool after tool. Package-private and
+     * overridable so the guard around it is unit-testable; a missing plugin context
+     * (shutdown race, headless test) is tolerated exactly like the recorder above.
+     */
+    void countRequest()
+    {
+        Activator activator = Activator.getDefault();
+        if (activator != null)
+        {
+            McpServer server = activator.getMcpServer();
+            if (server != null)
+            {
+                server.incrementRequestCount();
+            }
+        }
     }
 
     /**
@@ -511,7 +570,7 @@ public class McpProtocolHandler
         // Append user signal as markdown
         if (signal != null)
         {
-            result = result + "\n\n---\n**USER SIGNAL:** " + signal.getMessage();
+            result = addUserSignalToMarkdown(result, signal);
         }
         // In plain text mode, return markdown as plain text instead of embedded resource
         if (plainTextMode)
@@ -786,7 +845,7 @@ public class McpProtocolHandler
     /**
      * Adds user signal to a JSON result string using Gson for proper JSON handling.
      */
-    private String addUserSignalToJson(String jsonResult, UserSignal signal)
+    String addUserSignalToJson(String jsonResult, UserSignal signal)
     {
         try
         {
@@ -799,12 +858,12 @@ public class McpProtocolHandler
                 // Create userSignal object
                 com.google.gson.JsonObject signalObject = new com.google.gson.JsonObject();
                 signalObject.addProperty("type", signal.getType().name());
-                signalObject.addProperty("message", signal.getMessage());
+                signalObject.addProperty("message", boundedUserSignalMessage(signal.getMessage()));
                 
                 // Add to result
                 jsonObject.add("userSignal", signalObject);
                 
-                return new com.google.gson.Gson().toJson(jsonObject);
+                return GsonProvider.toJson(jsonObject);
             }
         }
         catch (Exception e)
@@ -812,6 +871,24 @@ public class McpProtocolHandler
             Activator.logError("Failed to add user signal to JSON", e);
         }
         return jsonResult;
+    }
+
+    static String addUserSignalToMarkdown(String markdown, UserSignal signal)
+    {
+        return markdown + "\n\n---\n**USER SIGNAL:** " //$NON-NLS-1$
+            + boundedUserSignalMessage(signal.getMessage());
+    }
+
+    private static String boundedUserSignalMessage(String message)
+    {
+        if (message == null || message.length() <= MAX_USER_SIGNAL_MESSAGE_CHARS)
+        {
+            return message;
+        }
+        int end = DcsXmlCodec.safeEndAtOrBefore(message, 0,
+            MAX_USER_SIGNAL_MESSAGE_CHARS - USER_SIGNAL_ELLIPSIS.length());
+        return message.substring(0, end)
+            + USER_SIGNAL_ELLIPSIS;
     }
     
     /**
@@ -917,8 +994,12 @@ public class McpProtocolHandler
 
         for (IMcpTool tool : toolRegistry.getVisibleTools())
         {
-            // Parse inputSchema from JSON string to JsonElement
-            JsonElement schema = JsonParser.parseString(tool.getInputSchema());
+            // Parse inputSchema from JSON string to JsonElement. The SHAPE a call is
+            // built from goes over the wire; the prose around it stops here, except the
+            // few parameters allowlisted in InputSchemaCompactor — see it for why this
+            // reverses what OutputSchemaCompactor's javadoc used to say.
+            JsonElement schema =
+                InputSchemaCompactor.compact(tool.getName(), JsonParser.parseString(tool.getInputSchema()));
             // A tool may supply explicit annotations; otherwise the central
             // classifier derives the MCP behavioral hints from the tool name.
             Object annotations = tool.getAnnotations() != null
@@ -926,10 +1007,11 @@ public class McpProtocolHandler
                 : ToolAnnotationClassifier.classify(tool.getName());
             // JSON tools declare the shape of their structuredContent; other tools
             // return content (not structured data) and leave outputSchema null, in
-            // which case the shared Gson omits the field entirely.
+            // which case the shared Gson omits the field entirely. The shape goes over
+            // the wire but its prose does not — see OutputSchemaCompactor for why.
             String outputSchemaJson = tool.getOutputSchema();
             JsonElement outputSchema = outputSchemaJson != null
-                ? JsonParser.parseString(outputSchemaJson)
+                ? OutputSchemaCompactor.compact(JsonParser.parseString(outputSchemaJson))
                 : null;
             result.addTool(tool.getName(), tool.getDescription(), schema, annotations, outputSchema);
         }

@@ -51,11 +51,10 @@ public class GetPlatformDocumentationTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Look up 1C:Enterprise platform documentation for built-in types " + //$NON-NLS-1$
-               "(ValueTable, Array, Structure) and global built-in functions, including " + //$NON-NLS-1$
-               "their methods, properties, constructors and events. Use when you need the " + //$NON-NLS-1$
-               "exact platform API signature rather than configuration metadata. " + //$NON-NLS-1$
-               "Full parameters and examples: call get_tool_guide('get_platform_documentation')."; //$NON-NLS-1$
+        return "Look up a built-in 1C type or global function in the platform documentation. Returns " //$NON-NLS-1$
+            + "headers and member names by default - pass responseFormat='detailed' for signatures, " //$NON-NLS-1$
+            + "parameters and return types. Parameters and examples: " //$NON-NLS-1$
+            + "get_tool_guide('get_platform_documentation')."; //$NON-NLS-1$
     }
 
     @Override
@@ -160,7 +159,8 @@ public class GetPlatformDocumentationTool implements IMcpTool
         switch (category.toLowerCase())
         {
             case CATEGORY_TYPE:
-                result = service.getTypeDocumentation(typeName, memberName, memberType, projectName, limit, useRussian);
+                result = service.getTypeDocumentation(typeName, memberName, memberType, projectName,
+                    limit, useRussian, detailed);
                 break;
             case CATEGORY_BUILTIN:
                 result = service.getBuiltinFunctionDocumentation(typeName, useRussian);
@@ -191,7 +191,7 @@ public class GetPlatformDocumentationTool implements IMcpTool
      * <p>
      * Keeps every structural / actionable line — the H1 type/function header, the
      * {@code **Type Info:**} block, {@code **Collection element types:**}, the
-     * {@code **Category:**} line, every section ({@code ## ...}) and member
+     * {@code **Category:**} and {@code **Type set:**} lines, every section ({@code ## ...}) and member
      * ({@code ### ...}) heading, and the results-limit footer — so the full member
      * inventory and the headers asserted by callers/e2e survive. It drops only the
      * verbose per-member body: {@code **Parameters:**} and their bullet lines,
@@ -213,6 +213,7 @@ public class GetPlatformDocumentationTool implements IMcpTool
 
         StringBuilder out = new StringBuilder();
         boolean inTypeInfo = false;
+        boolean inValues = false;
         boolean lastBlank = false;
         for (String line : full.split("\n", -1)) //$NON-NLS-1$ // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
         {
@@ -229,8 +230,15 @@ public class GetPlatformDocumentationTool implements IMcpTool
             {
                 inTypeInfo = false;
             }
+            // A system enumeration's values are bullets under "## Values" and ARE the inventory, so
+            // unlike a parameter list they must survive the concise rendering. The block opens on
+            // its heading and closes on the next one.
+            if (line.startsWith("## ")) //$NON-NLS-1$
+            {
+                inValues = trimmed.equals("## Values"); //$NON-NLS-1$
+            }
 
-            boolean keep = shouldKeepLine(line, trimmed, inTypeInfo);
+            boolean keep = shouldKeepLine(line, trimmed, inTypeInfo, inValues);
 
             if (!keep)
             {
@@ -258,11 +266,13 @@ public class GetPlatformDocumentationTool implements IMcpTool
     /**
      * Decides whether a single line of the 'detailed' markdown survives into the 'concise' rendering —
      * the keep-predicate of {@link #condense}. Keeps blank lines (collapsed by the caller), the H1/H2/H3
-     * headings, the {@code **Type Info:**} header and its bullets (only while {@code inTypeInfo}), the
+     * headings, the {@code **Type Info:**} header and its bullets (only while {@code inTypeInfo}),
+     * a system enumeration's value bullets (only while {@code inValues}), the
      * {@code **Collection element types:**} / {@code **Category:**} lines and the results-limit footer;
      * drops everything else. Pure predicate over the supplied line state.
      */
-    private static boolean shouldKeepLine(String line, String trimmed, boolean inTypeInfo)
+    private static boolean shouldKeepLine(String line, String trimmed, boolean inTypeInfo,
+        boolean inValues)
     {
         return trimmed.isEmpty() // blank lines kept (collapsed below)
             || line.startsWith("# ") //$NON-NLS-1$
@@ -270,8 +280,16 @@ public class GetPlatformDocumentationTool implements IMcpTool
             || line.startsWith("### ") //$NON-NLS-1$
             || trimmed.equals("**Type Info:**") //$NON-NLS-1$
             || (inTypeInfo && trimmed.startsWith("- ")) //$NON-NLS-1$
+            // A system enumeration's values ARE its member inventory - they are bullets rather than
+            // '###' headings, so without this the concise (DEFAULT) rendering left an empty
+            // "## Values" section, hiding the very thing issue #299 added.
+            || (inValues && trimmed.startsWith("- ")) //$NON-NLS-1$
             || trimmed.startsWith("**Collection element types:**") //$NON-NLS-1$
             || trimmed.startsWith("**Category:**") //$NON-NLS-1$
+            // Which TYPE SET the caller's name resolved through. Structural, not a member body:
+            // without it the concise answer to 'СправочникОбъект' is headed by a type name the
+            // caller never asked for and cannot connect back (issue #355).
+            || trimmed.startsWith("**Type set:**") //$NON-NLS-1$
             || trimmed.startsWith("*Results limited to "); //$NON-NLS-1$
     }
 }

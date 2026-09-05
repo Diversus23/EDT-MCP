@@ -2,7 +2,7 @@
 
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**83 tools.**
+**93 tools.**
 
 ## Core
 
@@ -30,18 +30,19 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | Tool | Description |
 |------|-------------|
 | [`adopt_metadata_object`](adopt_metadata_object.md) | Adopt a base-configuration metadata object or member (object / form / attribute / tabular section / ...) into a configuration EXTENSION so the extension can… |
-| [`create_launch_config`](create_launch_config.md) | Create a 1C:EDT runtime-client launch configuration (thin/thick/web). The SAME config works for both run and debug (mode is chosen at launch time by debug_la… |
+| [`create_launch_config`](create_launch_config.md) | Create a 1C:EDT runtime-client launch configuration (thin/thick/web). The same config works for both run and debug; choose the mode with `launch`. |
 | [`create_metadata`](create_metadata.md) | Create a metadata node addressed by a 1C full-name FQN: a top-level object (Catalog.Products) or a subordinate member (Catalog.Products.Attribute.Weight, Inf… |
+| [`dcs`](dcs.md) | Read and author 1C DCS schemas, their settings variants, and form dynamic lists. Call action='get' first, pass its hash as expectedHash… |
 | [`delete_launch_config`](delete_launch_config.md) | Delete a 1C:EDT launch configuration by name (runtime client or Attach). Destructive: guarded by a confirm-preview - call without confirm to preview (no chan… |
-| [`delete_metadata`](delete_metadata.md) | Delete a metadata node (object or member, including a FORM object 'Type.Object.Form.Name' or a FORM member - item / attribute / command / handler) addressed… |
+| [`delete_metadata`](delete_metadata.md) | Delete a metadata node addressed by a 1C full-name FQN - a top object, an mdclass MEMBER (attribute / tabular section / dimension / resource / enum value), a… |
 | [`export_common_picture`](export_common_picture.md) | Export a 1C CommonPicture (общая картинка) as PNG and list its picture variants (dpi, theme, interface variant, direction, template flag, glyph size). Resolv… |
 | [`get_configuration_properties`](get_configuration_properties.md) | Get 1C:Enterprise configuration properties (name, synonym, comment, script variant, compatibility mode, etc.) |
 | [`get_subsystem_content`](get_subsystem_content.md) | Get one 1C subsystem's content: properties, its metadata objects (Type/Name/Synonym/FQN) and child subsystems, identified by FQN (e.g. 'Subsystem.Sales.Subsy… |
 | [`list_common_pictures`](list_common_pictures.md) | List a 1C configuration's CommonPicture objects and the variants each carries in its Picture.zip (DPI, theme, interface variant, template flag, glyph size, p… |
-| [`list_configurations`](list_configurations.md) | List EDT launch configurations (runtime client + Attach + other 1C types) with their running state. This is the discovery step before debug_launch / run_yaxu… |
+| [`list_configurations`](list_configurations.md) | List EDT launch configurations (runtime client + Attach + other 1C types) with their running state. This is the discovery step before launch / run_yaxu… |
 | [`list_subsystems`](list_subsystems.md) | List 1C subsystems of a configuration as a flat table (FQN, Synonym, Comment, InCommandInterface, content count, children count). Walks the whole tree by def… |
-| [`modify_metadata`](modify_metadata.md) | Set properties of a metadata node (object or member, including a FORM member - item / attribute / command) addressed by a 1C full-name FQN, as properties=[{n… |
-| [`rename_metadata_object`](rename_metadata_object.md) | Rename a metadata object or attribute, cascading the change across all references in BSL code, forms, and other metadata. Use the two-phase workflow: call wi… |
+| [`modify_metadata`](modify_metadata.md) | Set properties of a metadata node - an object, a member, or a FORM member (item / attribute / command / handler) - addressed by a 1C full-name FQN, as proper… |
+| [`rename_metadata_object`](rename_metadata_object.md) | Rename a metadata object, one of its members, or a managed-form element (attribute / command / field / button / group / decoration / table / attribute column… |
 
 ## Code
 
@@ -51,7 +52,7 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 |------|-------------|
 | [`find_references`](find_references.md) | Find every place a metadata object is used: BSL code modules (with line numbers), other metadata, forms, roles, subsystems, etc. Pass the object FQN; the typ… |
 | [`get_content_assist`](get_content_assist.md) | Get code-completion proposals at a 1-based line/column in a BSL module - the members, globals and variables valid at that caret (e.g. after a '.'). May retur… |
-| [`get_method_call_hierarchy`](get_method_call_hierarchy.md) | Find a BSL method's call hierarchy: who calls it (callers, default) or what it calls (callees), via semantic AST analysis that resolves ru/en spellings (unli… |
+| [`get_method_call_hierarchy`](get_method_call_hierarchy.md) | Trace which BSL methods call a method or are called by it; optional depth walks the chain transitively for impact analysis (callers only, max 5). Finds STATI… |
 | [`get_outgoing_structures`](get_outgoing_structures.md) | For each outgoing qualified call in a BSL module (or one method), report the top-level literal keys of the Structure passed as its first argument (local .Ins… |
 | [`get_symbol_info`](get_symbol_info.md) | Get type/hover info about a symbol at a position in a BSL module. Returns inferred types, signatures, and documentation. |
 | [`go_to_definition`](go_to_definition.md) | Go to the definition of a symbol (the inverse of find_references): a qualified method 'ModuleName.MethodName', a bare 'MethodName' (also pass modulePath), or… |
@@ -65,11 +66,11 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 | Tool | Description |
 |------|-------------|
-| [`debug_launch`](debug_launch.md) | Start an EDT debug session: either an existing config by launchConfigurationName (runtime client OR Attach, the latter needed to debug server-side code), or… |
 | [`debug_status`](debug_status.md) | Report active debug sessions: applicationId (real or synthetic 'attach:<name>' / 'launch:<name>'), launch configuration name/type, mode (debug/run), whether… |
 | [`evaluate_expression`](evaluate_expression.md) | Evaluate a BSL expression in the context of a suspended stack frame. Pass frameRef from wait_for_break and the expression text. WARNING: this executes arbitr… |
 | [`get_applications`](get_applications.md) | Get list of applications (infobases) for a project. Returns application ID, name, type, and update state. Application ID is required for update_database and… |
 | [`get_variables`](get_variables.md) | Read variables from a stack frame of a suspended debug thread. Pass frameRef from wait_for_break (preferred) or threadId+frameIndex. Use expandPath to drill… |
+| [`launch`](launch.md) | Start a 1C application in EDT debug (default) or run mode. An already-running session is not relaunched unless restartIfRunning=true. |
 | [`list_breakpoints`](list_breakpoints.md) | List active line breakpoints. Optionally filter by projectName. |
 | [`remove_breakpoint`](remove_breakpoint.md) | Remove a 1C BSL line breakpoint. Either pass breakpointId (returned from set_breakpoint) or projectName+module+lineNumber to look it up by coordinates. |
 | [`resume`](resume.md) | Resume a suspended debug thread or all threads of a debug target. Pass threadId (from wait_for_break) or applicationId. applicationId accepts ANY id form for… |
@@ -81,12 +82,15 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 ## Testing
 
-> YAXUnit unit testing: run and debug test suites.
+> YAXUnit unit testing, 1C:Workmate assistance, and shared background-job polling.
 
 | Tool | Description |
 |------|-------------|
+| [`ask_workmate`](ask_workmate.md) | Start a background question to the 1C:Workmate plugin and return its jobId. Poll the job with get_job_status instead of calling ask_workmate again. Requires… *(not enabled by default)* |
+| [`cancel_job`](cancel_job.md) | Preview or cancel a background job by jobId. Destructive: omitting confirm or passing confirm=false only describes the owning tool, state, and progress; conf… |
 | [`debug_yaxunit_tests`](debug_yaxunit_tests.md) | Deprecated alias for run_yaxunit_tests with debug=true. Launches YAXUnit tests in DEBUG mode so breakpoints fire, then call wait_for_break to inspect. Prefer… |
-| [`run_yaxunit_tests`](run_yaxunit_tests.md) | Run YAXUnit tests for a 1C:Enterprise project and return a JUnit Markdown report. Polls for up to `timeout` seconds, then returns the report or **Pending** (… |
+| [`get_job_status`](get_job_status.md) | Poll any background job by the jobId returned from its owning tool. Returns the current state, progress journal, and terminal result; optionally waits for a… |
+| [`run_yaxunit_tests`](run_yaxunit_tests.md) | Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s, larger values… |
 
 ## Profiling
 
@@ -133,6 +137,7 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 | Tool | Description |
 |------|-------------|
+| [`apply_quick_fix`](apply_quick_fix.md) | Apply EDT's official quick-fix (auto-fix) to one validation marker — the headless counterpart of the 'Quick Fix' action in the problems view. Address the mar… |
 | [`build_external_objects`](build_external_objects.md) | Build (compile to disk) the external data processors/reports of an EDT external-object project to .epf/.erf files. Build ONE object with objectName, or ALL o… |
 | [`clean_project`](clean_project.md) | Clean EDT project and trigger full revalidation. Direction: DISK -> MODEL - re-imports the on-disk src/ .mdo files into the in-memory model. Refreshes files… |
 | [`create_git_branch`](create_git_branch.md) | Create a new local git branch, optionally check it out, and optionally attach an EXISTING infobase (application, from get_applications) to the new branch's c… |
@@ -153,6 +158,25 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`resync_to_disk`](resync_to_disk.md) | Bulk re-synchronize the in-memory BM model to the on-disk src/ .mdo files and report BM-to-disk desync. Direction: MODEL -> DISK (writes the model out to src… |
 | [`revalidate_objects`](revalidate_objects.md) | Revalidate EDT project or specific objects. If objects array is empty or missing, revalidates entire project. FQN examples: 'Document.SalesOrder', 'Catalog.P… |
 | [`set_branch_infobase`](set_branch_infobase.md) | Attach or detach an EXISTING infobase (application) to/from a specific git branch context, so switch_git_branch's automatic binding follows that branch. Targ… |
-| [`set_infobase_credentials`](set_infobase_credentials.md) | Store infobase connection credentials (user/password) so update_database and debug_launch can authenticate the update agent on an infobase that has a user li… |
+| [`set_infobase_credentials`](set_infobase_credentials.md) | Store infobase connection credentials (user/password) so update_database and launch can authenticate the update agent on an infobase that has a user li… |
 | [`switch_git_branch`](switch_git_branch.md) | Switch a project's git repository to another branch (headless EGit checkout). branch may be a short local name (e.g. 'feature/x') or a full ref ('refs/heads/… |
 | [`update_database`](update_database.md) | Apply configuration changes to an application's database (infobase), full or incremental. Target by launchConfigurationName (preferred) or projectName + appl… |
+| [`validate_xdto_package`](validate_xdto_package.md) | Validate a single XDTO package by running EDT's OWN configuration validation (the same check engine behind get_project_errors) scoped to that package, and re… |
+
+## Comparison
+
+> Read a three-way configuration comparison: start one against two git revisions, expand a node's differences, and read or author the merge-rules file EDT re-applies. Nothing is ever merged - running a merge stays a human action in EDT's comparison window.
+
+| Tool | Description |
+|------|-------------|
+| [`compare_configurations`](compare_configurations.md) | Compare a project's working tree against two git revisions (three-way) and report which top objects differ. Read-only: it never merges and never writes the p… |
+| [`get_comparison_node`](get_comparison_node.md) | Expand one node of a comparison started by compare_configurations: three-way property table, form structure, module sections, support state and potential pro… |
+| [`merge_rules`](merge_rules.md) | Read or author EDT's merge-rules file - the per-node decisions a configuration comparison saves and re-applies when it is launched. Which container to write… |
+
+## Git
+
+> Run raw git commands (status/diff/commit/push/pull/...) in a project's repository via the 'git' tool. Powerful (it can push, checkout, stash); DISABLED by default - check it in the MCP Server Tools preference tab to enable.
+
+| Tool | Description |
+|------|-------------|
+| [`git`](git.md) | Run a git command in a project's repository - the non-UI equivalent of typing it in a terminal. Send it as a shell-style string (e.g. 'status', 'diff HEAD~1'… *(not enabled by default)* |

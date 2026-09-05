@@ -12,10 +12,26 @@ It is guarded by a two-phase workflow (mirroring delete_metadata):
 
 After changing metadata/configuration, to push those changes into the running infobase so a launched client sees them. Typically: edit metadata -> `update_database` -> launch/restart the client.
 
-## Targeting (choose ONE)
+## Targeting
 
-1. **`launchConfigurationName`** (preferred) — exact runtime-client config name from `list_configurations`. It fixes the project + applicationId pair for you, so you cannot mismatch them. Must be a runtime-client config (not an Attach config).
-2. **`projectName` + `applicationId`** — used only when `launchConfigurationName` is omitted. Get `applicationId` from `get_applications`. Both are required in this mode.
+1. **`launchConfigurationName`** (preferred) — exact runtime-client config name from `list_configurations`. The project and the applicationId are read off the configuration, so a configuration that is bound to an application cannot be mismatched. Must be a runtime-client config (not an Attach config).
+2. **`projectName` + `applicationId`** — used when `launchConfigurationName` is omitted. Get `applicationId` from `get_applications`. Both are required in this mode.
+
+`projectName` is always taken from the configuration when one is named. `applicationId` is too — unless the configuration has no application binding, and then the section below applies.
+
+### A launch configuration with no application binding
+
+A runtime-client configuration can be created without being bound to an application (its `applicationId` attribute is empty) — the same case the launch tools cover by falling back to the project's default application. Here the fallback is deliberately narrower, because this call WRITES to a database and cannot be undone:
+
+- the project has **exactly one** application → that application is the target, and it is the same one `run_yaxunit_tests` / `launch` would have used for this configuration;
+- the project has **several** → the call is REFUSED and lists the candidates. Pick one and re-call with `projectName` + `applicationId`; updating the wrong database is not something this tool will guess at;
+- the project has **none of its own** → refused. For an extension project the applications belong to its base configuration project, and `update_database` must target THAT project (an application id is only resolvable through the project that owns it).
+
+If you pass `launchConfigurationName` **and** an explicit `applicationId`, the configuration's own binding still wins when it has one; your value is used only when the configuration has none (instead of falling back to the project).
+
+### The `applicationId` from `list_configurations` is not always an application id
+
+`list_configurations` reports `applicationId: "launch:<name>"` (or `"attach:<name>"`) for a configuration whose application binding is absent or unreadable — a launch identifier for debug tracking, minted from the configuration name. It is **not** an application id and `update_database` cannot resolve it ("Application not found"). Use the entry's `name` as `launchConfigurationName` (runtime-client configs only — an Attach config is rejected by type), or take a real id from `get_applications`. If targeting by name then reports that the configuration *could not be read*, one of its attributes is unreadable — do NOT conclude the binding is absent: repair or recreate the configuration in EDT, or target the update with `projectName` + a real `applicationId`.
 
 ## Parameter details
 
@@ -69,7 +85,7 @@ Workaround: update via the platform CLI instead — `export_configuration_to_xml
 - With `terminateRunningClients=false`, most failures are the exclusive lock above — terminate the running launch first (the default frees it automatically).
 - `launchConfigurationName` must reference a runtime-client config; an Attach config is rejected.
 - The project must exist and be open; a closed project returns an error.
-- Running this on a **standalone-server** application (`applicationId` starting with `ServerApplication.`) STARTS the standalone server in RUN mode as a side effect — that is EDT-native behaviour of the server-application update (the configurator agent publishes the modules into the running server). A subsequent `debug_launch` will then have to restart that server in DEBUG mode. Prefer letting the launch do the update: `debug_launch` / `run_yaxunit_tests` with `updateBeforeLaunch=true` defer the server-app update to EDT's coordinated launch flow.
+- Running this on a **standalone-server** application (`applicationId` starting with `ServerApplication.`) STARTS the standalone server in RUN mode as a side effect — that is EDT-native behaviour of the server-application update (the configurator agent publishes the modules into the running server). A subsequent `launch` will then have to restart that server in DEBUG mode. Prefer letting the launch do the update: `launch` / `run_yaxunit_tests` with `updateBeforeLaunch=true` defer the server-app update to EDT's coordinated launch flow.
 
 ## Infobase changed outside EDT
 
@@ -92,3 +108,62 @@ The modal's own default button is **Import**, which would rewrite the project so
 plugin never presses it blind: if the labelled button for the selected policy cannot be found (an
 unshipped locale, a reworded button) the dialog is cancelled and the update reports the failure
 instead of writing anything.
+
+## Standalone server: busy ports
+
+Updating a standalone-server application (`applicationId` starting with `ServerApplication.`)
+STARTS the server first. If one of its configured ports (HTTP gate / debug server / SSH gate) is
+already bound, EDT raises a modal titled **"Standalone server port conflict"** /
+**"Конфликт портов автономного сервера"** offering *Find free port* or *Cancel*. Nobody presses it
+in an unattended run, so the call would block until the client times out.
+
+`standaloneServerPortConflict` answers it for you:
+
+| value | what happens | when to use |
+|---|---|---|
+| `cancel` (default) | the server does not start; the call fails and names the busy ports | you want to know about the conflict and fix it yourself — nothing on the stand is changed |
+| `reassign` | EDT picks free ports, **rewrites the server configuration** and the operation proceeds | you accept that the server changes address (its clients must follow) |
+
+The dialog's DEFAULT button is *Find free port*, so this plugin never presses it blind: with
+`cancel` it presses the labelled *Cancel*, and with `reassign` it presses *Find free port* by its
+label — a build or locale whose button labels are unknown falls back to cancelling rather than
+rewriting the configuration. A `reassign` that was actually applied is reported back:
+`standaloneServerPortsReassigned: true` plus a NOTE in the message.
+
+The usual holder of a busy port is an `ibsrv` process left over from an earlier EDT session — it
+survives EDT being killed. Stopping it (or stopping the server in EDT's *Servers* view) is
+usually preferable to re-addressing the server.
+
+The same parameter exists on `launch` and `run_yaxunit_tests`, which start the server too.
+Where the refusal shows up differs: `launch` is fire-and-forget, so it reports through
+`debug_status` under `recentLaunchFailures`; `run_yaxunit_tests` reports through its own named job -
+in the initial response, or from `get_job_status(jobId)`.
+
+## Standalone server: "can only start server that is stopped" (handled for you)
+
+EDT starts a standalone server only from the STOPPED state, and its own "already running, nothing
+to do" shortcut applies only when the server is STARTED **and** still holds a live launch. Two
+situations therefore reach the platform's refusal *"Can only start server that is stopped but
+current server state is 2"*:
+
+- **the stuck server** - EDT returns a server to STOPPED only once it has confirmed the `ibsrv`
+  process is gone, and it waits only a few seconds for that. When the process takes longer, or the
+  wait is interrupted, the server stays marked STARTED with a launch that is already dead, and
+  nothing clears it: from then on EVERY launch or update of that application fails the same way;
+- **the race** - a second operation asks to start the server while a first start is still
+  STARTING; by the time the platform runs the start, the state is already STARTED.
+
+Both are handled before the operation runs: the server state is read first, and
+
+- STARTED with a live launch -> nothing is done (EDT will no-op, exactly as its own check does);
+- STARTED with no live launch -> the server is stopped through EDT's own application lifecycle,
+  then the operation proceeds;
+- STARTING/STOPPING -> the operation waits (bounded, 30s) for the state to settle instead of
+  failing; a server somebody else is starting is never stopped underneath them.
+
+A refusal that still arrives (the state can go stale between the check and the start) is repaired
+the same way and the operation is retried ONCE. If the retry fails too, the error says so and names
+the likely reason: an `ibsrv` left over from the previous run still holding the ports.
+
+EDT's own background jobs - notably its external-object dump - can still lose this race on their
+own, which is logged in the workbench log without failing the MCP call.

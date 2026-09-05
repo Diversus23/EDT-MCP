@@ -166,6 +166,8 @@ whole suite by calling the `mcp__EDT-MCP-Server__*` tools and recording PASS/FAI
   - `{typeName:"ТаблицаЗначений"}` → same type via Russian name.
   - `{typeName:"FindFiles", category:"builtin"}` → built‑in function.
   - `{typeName:"ValueTable", language:"ru"}` → Russian output.
+  - `{typeName:"CatalogObject"}` / `{typeName:"СправочникОбъект"}` → the metadata TYPE SET: the generic type behind it plus a `**Type set:**` line.
+  - `{typeName:"AnyRef"}` → `isError`, `No documentation for type set` (a set that unions others carries no members — distinct from `Documentation unavailable for type set`, which means the target exists but could not be reached, so a retry may help).
 - **Assert:** returns the type with EN/RU names (`ValueTable / ТаблицаЗначений`) and member sections.
 - **Validated 2026‑06‑01:** PASS — methods Add/ChooseRow/Clear/Copy with params & returns.
 
@@ -350,7 +352,7 @@ whole suite by calling the `mcp__EDT-MCP-Server__*` tools and recording PASS/FAI
 - **Note:** CLAUDE.md restricts this to explicit user request; the Claude Code auto‑mode classifier **blocks** it even on the error path. A test agent must treat it as `SKIPPED (needs approval + infobase)`.
 - **Validated 2026‑06‑01:** not run — blocked by safety classifier (expected).
 
-### debug_launch
+### launch
 - **Type:** app/launch · **Runnable on IRP:** error‑only here
 - **Cases:** `{projectName:"IRP"}` (no app) → error; (sandbox) `{launchConfigurationName:"…"}` or `{projectName,applicationId}`; Attach config → `applicationId:"attach:<name>"`.
 - **Assert:** missing app → `success:false`, error mentions `applicationId is required` / lists configs.
